@@ -23,6 +23,7 @@ import {
   DialogFooter,
   DialogCloseTrigger,
   DialogBackdrop,
+  ConfirmDialog,
 } from "../components/ui/dialog";
 import { Field } from "../components/ui/field";
 import { toaster } from "../components/ui/toaster";
@@ -35,6 +36,8 @@ export function CharactersPage() {
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingCharacter, setEditingCharacter] = useState<Character | null>(null);
+  const [isConfirmDeleteOpen, setIsConfirmDeleteOpen] = useState(false);
+  const [characterToDelete, setCharacterToDelete] = useState<number | null>(null);
 
   useEffect(() => {
     loadCharacters();
@@ -65,10 +68,15 @@ export function CharactersPage() {
     setIsModalOpen(true);
   }
 
-  async function handleDelete(id: number) {
-    if (!confirm("Are you sure you want to delete this character?")) return;
+  function handleDeleteClick(id: number) {
+    setCharacterToDelete(id);
+    setIsConfirmDeleteOpen(true);
+  }
+
+  async function handleDeleteConfirm() {
+    if (!characterToDelete) return;
     try {
-      await charactersApi.delete(id);
+      await charactersApi.delete(characterToDelete);
       toaster.success({ title: "Character deleted" });
       await loadCharacters();
     } catch (err) {
@@ -76,6 +84,8 @@ export function CharactersPage() {
         title: "Error",
         description: err instanceof Error ? err.message : "Failed to delete",
       });
+    } finally {
+      setCharacterToDelete(null);
     }
   }
 
@@ -160,7 +170,7 @@ export function CharactersPage() {
                       size="sm"
                       color="error.fg"
                       _hover={{ bg: "error.muted" }}
-                      onClick={() => handleDelete(character.id)}
+                      onClick={() => handleDeleteClick(character.id)}
                     >
                       <FiTrash2 />
                     </IconButton>
@@ -182,6 +192,16 @@ export function CharactersPage() {
         onOpenChange={(open) => setIsModalOpen(open)}
         character={editingCharacter}
         onSave={handleSave}
+      />
+
+      <ConfirmDialog
+        open={isConfirmDeleteOpen}
+        onOpenChange={setIsConfirmDeleteOpen}
+        title="Delete Character"
+        description="Are you sure you want to delete this character? This action cannot be undone."
+        confirmText="Delete"
+        onConfirm={handleDeleteConfirm}
+        confirmColorScheme="red"
       />
     </Box>
   );

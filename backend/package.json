@@ -5,14 +5,20 @@
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
-    "db:init": "bun run src/db/init.ts"
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
+    "drizzle-orm": "^0.45.1",
     "hono": "^4.6.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/bun": "latest",
+    "better-sqlite3": "^12.5.0",
+    "drizzle-kit": "^0.31.8",
     "typescript": "^5.0.0"
   }
 }
-

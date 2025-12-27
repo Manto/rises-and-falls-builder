@@ -1,14 +1,10 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
-import { initializeDatabase } from "./db";
 import characters from "./routes/characters";
 import locations from "./routes/locations";
 import variables from "./routes/variables";
 import scenes from "./routes/scenes";
-
-// Initialize database on startup
-initializeDatabase();
 
 // Create the app
 const app = new Hono();
@@ -53,4 +49,3 @@ export default {
   port,
   fetch: app.fetch,
 };
-

@@ -1,54 +1,74 @@
 import { Hono } from "hono";
+import { eq } from "drizzle-orm";
 import { db, getCurrentTimestamp } from "../db";
-import type { CharacterRow, Character, CreateCharacterInput } from "../types";
+import { characters } from "../db/schema";
 
-const characters = new Hono();
-
-// Transform database row to API response
-function toCharacter(row: CharacterRow): Character {
-  return {
-    id: row.id,
-    name: row.name,
-    blurb: row.blurb,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
+const app = new Hono();
 
 // GET /characters - List all characters
-characters.get("/", (c) => {
-  const rows = db.query("SELECT * FROM characters ORDER BY name").all() as CharacterRow[];
-  return c.json(rows.map(toCharacter));
+app.get("/", async (c) => {
+  const rows = await db.query.characters.findMany({
+    orderBy: (characters, { asc }) => [asc(characters.name)],
+  });
+
+  return c.json(
+    rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      blurb: row.blurb,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    }))
+  );
 });
 
 // GET /characters/:id - Get a single character
-characters.get("/:id", (c) => {
+app.get("/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const row = db.query("SELECT * FROM characters WHERE id = ?").get(id) as CharacterRow | null;
-  
+  const row = await db.query.characters.findFirst({
+    where: eq(characters.id, id),
+  });
+
   if (!row) {
     return c.json({ error: "Character not found" }, 404);
   }
-  
-  return c.json(toCharacter(row));
+
+  return c.json({
+    id: row.id,
+    name: row.name,
+    blurb: row.blurb,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  });
 });
 
 // POST /characters - Create a new character
-characters.post("/", async (c) => {
-  const body = await c.req.json<CreateCharacterInput>();
-  
+app.post("/", async (c) => {
+  const body = await c.req.json<{ name: string; blurb?: string }>();
+
   if (!body.name || body.name.trim() === "") {
     return c.json({ error: "Name is required" }, 400);
   }
 
   try {
-    const result = db
-      .query(
-        "INSERT INTO characters (name, blurb) VALUES (?, ?) RETURNING *"
-      )
-      .get(body.name.trim(), body.blurb || "") as CharacterRow;
+    const [result] = await db
+      .insert(characters)
+      .values({
+        name: body.name.trim(),
+        blurb: body.blurb || "",
+      })
+      .returning();
 
-    return c.json(toCharacter(result), 201);
+    return c.json(
+      {
+        id: result.id,
+        name: result.name,
+        blurb: result.blurb,
+        createdAt: result.createdAt,
+        updatedAt: result.updatedAt,
+      },
+      201
+    );
   } catch (error: any) {
     if (error.message?.includes("UNIQUE constraint")) {
       return c.json({ error: "A character with this name already exists" }, 409);
@@ -58,29 +78,37 @@ characters.post("/", async (c) => {
 });
 
 // PUT /characters/:id - Update a character
-characters.put("/:id", async (c) => {
+app.put("/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const body = await c.req.json<Partial<CreateCharacterInput>>();
+  const body = await c.req.json<{ name?: string; blurb?: string }>();
   const timestamp = getCurrentTimestamp();
 
-  const existing = db.query("SELECT * FROM characters WHERE id = ?").get(id);
+  const existing = await db.query.characters.findFirst({
+    where: eq(characters.id, id),
+  });
+
   if (!existing) {
     return c.json({ error: "Character not found" }, 404);
   }
 
   try {
-    const result = db
-      .query(
-        `UPDATE characters 
-         SET name = COALESCE(?, name),
-             blurb = COALESCE(?, blurb),
-             updated_at = ?
-         WHERE id = ?
-         RETURNING *`
-      )
-      .get(body.name?.trim(), body.blurb, timestamp, id) as CharacterRow;
+    const [result] = await db
+      .update(characters)
+      .set({
+        name: body.name?.trim() ?? existing.name,
+        blurb: body.blurb ?? existing.blurb,
+        updatedAt: timestamp,
+      })
+      .where(eq(characters.id, id))
+      .returning();
 
-    return c.json(toCharacter(result));
+    return c.json({
+      id: result.id,
+      name: result.name,
+      blurb: result.blurb,
+      createdAt: result.createdAt,
+      updatedAt: result.updatedAt,
+    });
   } catch (error: any) {
     if (error.message?.includes("UNIQUE constraint")) {
       return c.json({ error: "A character with this name already exists" }, 409);
@@ -90,17 +118,19 @@ characters.put("/:id", async (c) => {
 });
 
 // DELETE /characters/:id - Delete a character
-characters.delete("/:id", (c) => {
+app.delete("/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
-  
-  const existing = db.query("SELECT * FROM characters WHERE id = ?").get(id);
+
+  const existing = await db.query.characters.findFirst({
+    where: eq(characters.id, id),
+  });
+
   if (!existing) {
     return c.json({ error: "Character not found" }, 404);
   }
 
-  db.query("DELETE FROM characters WHERE id = ?").run(id);
+  await db.delete(characters).where(eq(characters.id, id));
   return c.json({ success: true });
 });
 
-export default characters;
-
+export default app;

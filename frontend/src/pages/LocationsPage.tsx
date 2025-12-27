@@ -23,6 +23,7 @@ import {
   DialogFooter,
   DialogCloseTrigger,
   DialogBackdrop,
+  ConfirmDialog,
 } from "../components/ui/dialog";
 import { Field } from "../components/ui/field";
 import { toaster } from "../components/ui/toaster";
@@ -35,6 +36,8 @@ export function LocationsPage() {
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingLocation, setEditingLocation] = useState<Location | null>(null);
+  const [isConfirmDeleteOpen, setIsConfirmDeleteOpen] = useState(false);
+  const [locationToDelete, setLocationToDelete] = useState<number | null>(null);
 
   useEffect(() => {
     loadLocations();
@@ -65,10 +68,15 @@ export function LocationsPage() {
     setIsModalOpen(true);
   }
 
-  async function handleDelete(id: number) {
-    if (!confirm("Are you sure you want to delete this location?")) return;
+  function handleDeleteClick(id: number) {
+    setLocationToDelete(id);
+    setIsConfirmDeleteOpen(true);
+  }
+
+  async function handleDeleteConfirm() {
+    if (!locationToDelete) return;
     try {
-      await locationsApi.delete(id);
+      await locationsApi.delete(locationToDelete);
       toaster.success({ title: "Location deleted" });
       await loadLocations();
     } catch (err) {
@@ -76,6 +84,8 @@ export function LocationsPage() {
         title: "Error",
         description: err instanceof Error ? err.message : "Failed to delete",
       });
+    } finally {
+      setLocationToDelete(null);
     }
   }
 
@@ -160,7 +170,7 @@ export function LocationsPage() {
                       size="sm"
                       color="error.fg"
                       _hover={{ bg: "error.muted" }}
-                      onClick={() => handleDelete(location.id)}
+                      onClick={() => handleDeleteClick(location.id)}
                     >
                       <FiTrash2 />
                     </IconButton>
@@ -182,6 +192,16 @@ export function LocationsPage() {
         onOpenChange={(open) => setIsModalOpen(open)}
         location={editingLocation}
         onSave={handleSave}
+      />
+
+      <ConfirmDialog
+        open={isConfirmDeleteOpen}
+        onOpenChange={setIsConfirmDeleteOpen}
+        title="Delete Location"
+        description="Are you sure you want to delete this location? This action cannot be undone."
+        confirmText="Delete"
+        onConfirm={handleDeleteConfirm}
+        confirmColorScheme="red"
       />
     </Box>
   );

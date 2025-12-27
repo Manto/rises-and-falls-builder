@@ -26,6 +26,7 @@ import {
   DialogFooter,
   DialogCloseTrigger,
   DialogBackdrop,
+  ConfirmDialog,
 } from "../components/ui/dialog";
 import { Field } from "../components/ui/field";
 import { toaster } from "../components/ui/toaster";
@@ -50,6 +51,8 @@ export function ScenesPage() {
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingScene, setEditingScene] = useState<Scene | null>(null);
+  const [isConfirmDeleteOpen, setIsConfirmDeleteOpen] = useState(false);
+  const [sceneToDelete, setSceneToDelete] = useState<number | null>(null);
 
   useEffect(() => {
     loadData();
@@ -88,10 +91,15 @@ export function ScenesPage() {
     setIsModalOpen(true);
   }
 
-  async function handleDelete(id: number) {
-    if (!confirm("Are you sure you want to delete this scene?")) return;
+  function handleDeleteClick(id: number) {
+    setSceneToDelete(id);
+    setIsConfirmDeleteOpen(true);
+  }
+
+  async function handleDeleteConfirm() {
+    if (!sceneToDelete) return;
     try {
-      await scenesApi.delete(id);
+      await scenesApi.delete(sceneToDelete);
       toaster.success({ title: "Scene deleted" });
       await loadData();
     } catch (err) {
@@ -99,6 +107,8 @@ export function ScenesPage() {
         title: "Error",
         description: err instanceof Error ? err.message : "Failed to delete",
       });
+    } finally {
+      setSceneToDelete(null);
     }
   }
 
@@ -199,7 +209,7 @@ export function ScenesPage() {
                       size="sm"
                       color="error.fg"
                       _hover={{ bg: "error.muted" }}
-                      onClick={() => handleDelete(scene.id)}
+                      onClick={() => handleDeleteClick(scene.id)}
                     >
                       <FiTrash2 />
                     </IconButton>
@@ -323,6 +333,16 @@ export function ScenesPage() {
         locations={locations}
         variables={variables}
         onSave={handleSave}
+      />
+
+      <ConfirmDialog
+        open={isConfirmDeleteOpen}
+        onOpenChange={setIsConfirmDeleteOpen}
+        title="Delete Scene"
+        description="Are you sure you want to delete this scene? This action cannot be undone."
+        confirmText="Delete"
+        onConfirm={handleDeleteConfirm}
+        confirmColorScheme="red"
       />
     </Box>
   );

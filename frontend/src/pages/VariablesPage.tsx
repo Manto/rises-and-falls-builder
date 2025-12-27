@@ -14,6 +14,7 @@ import {
   IconButton,
   CloseButton,
   Badge,
+  NativeSelect,
 } from "@chakra-ui/react";
 import {
   DialogRoot,
@@ -24,18 +25,23 @@ import {
   DialogFooter,
   DialogCloseTrigger,
   DialogBackdrop,
+  ConfirmDialog,
 } from "../components/ui/dialog";
 import { Field } from "../components/ui/field";
 import { toaster } from "../components/ui/toaster";
 import { FiPlus, FiEdit2, FiTrash2 } from "react-icons/fi";
 import { variablesApi } from "../api/client";
-import type { Variable, CreateVariableInput } from "../types";
+import type { Variable, CreateVariableInput, VariableType } from "../types";
 
 export function VariablesPage() {
   const [variables, setVariables] = useState<Variable[]>([]);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingVariable, setEditingVariable] = useState<Variable | null>(null);
+  const [isConfirmDeleteOpen, setIsConfirmDeleteOpen] = useState(false);
+  const [variableToDelete, setVariableToDelete] = useState<number | null>(null);
+  const [filterType, setFilterType] = useState<VariableType | "All">("All");
+  const [filterSearch, setFilterSearch] = useState("");
 
   useEffect(() => {
     loadVariables();
@@ -66,10 +72,15 @@ export function VariablesPage() {
     setIsModalOpen(true);
   }
 
-  async function handleDelete(id: number) {
-    if (!confirm("Are you sure you want to delete this variable?")) return;
+  function handleDeleteClick(id: number) {
+    setVariableToDelete(id);
+    setIsConfirmDeleteOpen(true);
+  }
+
+  async function handleDeleteConfirm() {
+    if (!variableToDelete) return;
     try {
-      await variablesApi.delete(id);
+      await variablesApi.delete(variableToDelete);
       toaster.success({ title: "Variable deleted" });
       await loadVariables();
     } catch (err) {
@@ -77,6 +88,8 @@ export function VariablesPage() {
         title: "Error",
         description: err instanceof Error ? err.message : "Failed to delete",
       });
+    } finally {
+      setVariableToDelete(null);
     }
   }
 
@@ -91,6 +104,16 @@ export function VariablesPage() {
     setIsModalOpen(false);
     await loadVariables();
   }
+
+  // Filter variables based on type and search
+  const filteredVariables = variables.filter((variable) => {
+    const matchesType = filterType === "All" || variable.type === filterType;
+    const matchesSearch = 
+      filterSearch === "" ||
+      variable.name.toLowerCase().includes(filterSearch.toLowerCase()) ||
+      variable.description.toLowerCase().includes(filterSearch.toLowerCase());
+    return matchesType && matchesSearch;
+  });
 
   if (loading) {
     return (
@@ -114,6 +137,36 @@ export function VariablesPage() {
         </Button>
       </Flex>
 
+      {variables.length > 0 && (
+        <Flex gap={3} mb={4} flexWrap="wrap">
+          <Input
+            placeholder="Search variables..."
+            value={filterSearch}
+            onChange={(e) => setFilterSearch(e.target.value)}
+            maxW="300px"
+            bg="bg.subtle"
+            borderColor="border.DEFAULT"
+            _hover={{ borderColor: "border.strong" }}
+            _focus={{ borderColor: "accent.DEFAULT", boxShadow: "none" }}
+          />
+          <NativeSelect.Root maxW="200px">
+            <NativeSelect.Field
+              value={filterType}
+              onChange={(e) => setFilterType(e.target.value as VariableType | "All")}
+              bg="bg.subtle"
+              borderColor="border.DEFAULT"
+              _hover={{ borderColor: "border.strong" }}
+              _focus={{ borderColor: "accent.DEFAULT", boxShadow: "none" }}
+            >
+              <option value="All">All Types</option>
+              <option value="Character">Character</option>
+              <option value="World State">World State</option>
+              <option value="Knowledge">Knowledge</option>
+            </NativeSelect.Field>
+          </NativeSelect.Root>
+        </Flex>
+      )}
+
       {variables.length === 0 ? (
         <VStack py={8} gap={3}>
           <Text fontSize="3xl">⚡</Text>
@@ -132,9 +185,16 @@ export function VariablesPage() {
             Create your first variable
           </Button>
         </VStack>
+      ) : filteredVariables.length === 0 ? (
+        <VStack py={8} gap={3}>
+          <Text fontSize="2xl">🔍</Text>
+          <Text fontSize="md" color="fg.muted">
+            No variables match your filters
+          </Text>
+        </VStack>
       ) : (
         <Grid templateColumns="repeat(auto-fill, minmax(280px, 1fr))" gap={3}>
-          {variables.map((variable) => (
+          {filteredVariables.map((variable) => (
             <Card.Root
               key={variable.id}
               bg="bg.panel"
@@ -148,17 +208,37 @@ export function VariablesPage() {
                 <Flex justify="space-between" align="flex-start" mb={2}>
                   <Box>
                     <Heading size="sm" mb={1} color="fg.DEFAULT">{variable.name}</Heading>
-                    <Badge
-                      bg="accent.muted"
-                      color="accent.fg"
-                      fontFamily="mono"
-                      fontSize="xs"
-                      px={2}
-                      py={1}
-                      rounded="md"
-                    >
-                      Default: {variable.defaultValue}
-                    </Badge>
+                    <Flex gap={2} flexWrap="wrap">
+                      <Badge
+                        bg={
+                          variable.type === "Character" ? "blue.muted" :
+                          variable.type === "Knowledge" ? "purple.muted" :
+                          "accent.muted"
+                        }
+                        color={
+                          variable.type === "Character" ? "blue.fg" :
+                          variable.type === "Knowledge" ? "purple.fg" :
+                          "accent.fg"
+                        }
+                        fontSize="xs"
+                        px={2}
+                        py={1}
+                        rounded="md"
+                      >
+                        {variable.type}
+                      </Badge>
+                      <Badge
+                        bg="bg.muted"
+                        color="fg.muted"
+                        fontFamily="mono"
+                        fontSize="xs"
+                        px={2}
+                        py={1}
+                        rounded="md"
+                      >
+                        Default: {variable.defaultValue}
+                      </Badge>
+                    </Flex>
                   </Box>
                   <Flex gap={1}>
                     <IconButton
@@ -177,7 +257,7 @@ export function VariablesPage() {
                       size="sm"
                       color="error.fg"
                       _hover={{ bg: "error.muted" }}
-                      onClick={() => handleDelete(variable.id)}
+                      onClick={() => handleDeleteClick(variable.id)}
                     >
                       <FiTrash2 />
                     </IconButton>
@@ -200,6 +280,16 @@ export function VariablesPage() {
         variable={editingVariable}
         onSave={handleSave}
       />
+
+      <ConfirmDialog
+        open={isConfirmDeleteOpen}
+        onOpenChange={setIsConfirmDeleteOpen}
+        title="Delete Variable"
+        description="Are you sure you want to delete this variable? This action cannot be undone."
+        confirmText="Delete"
+        onConfirm={handleDeleteConfirm}
+        confirmColorScheme="red"
+      />
     </Box>
   );
 }
@@ -215,6 +305,7 @@ function VariableModal({ open, onOpenChange, variable, onSave }: VariableModalPr
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [defaultValue, setDefaultValue] = useState(0);
+  const [type, setType] = useState<VariableType>("World State");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -222,6 +313,7 @@ function VariableModal({ open, onOpenChange, variable, onSave }: VariableModalPr
       setName(variable?.name || "");
       setDescription(variable?.description || "");
       setDefaultValue(variable?.defaultValue ?? 0);
+      setType(variable?.type || "World State");
     }
   }, [open, variable]);
 
@@ -238,6 +330,7 @@ function VariableModal({ open, onOpenChange, variable, onSave }: VariableModalPr
         name: name.trim(),
         description: description.trim(),
         defaultValue,
+        type,
       });
     } catch (err) {
       toaster.error({
@@ -275,6 +368,22 @@ function VariableModal({ open, onOpenChange, variable, onSave }: VariableModalPr
                   _focus={{ borderColor: "accent.DEFAULT", boxShadow: "none" }}
                   autoFocus
                 />
+              </Field>
+              <Field label="Type">
+                <NativeSelect.Root>
+                  <NativeSelect.Field
+                    value={type}
+                    onChange={(e) => setType(e.target.value as VariableType)}
+                    bg="bg.subtle"
+                    borderColor="border.DEFAULT"
+                    _hover={{ borderColor: "border.strong" }}
+                    _focus={{ borderColor: "accent.DEFAULT", boxShadow: "none" }}
+                  >
+                    <option value="Character">Character</option>
+                    <option value="World State">World State</option>
+                    <option value="Knowledge">Knowledge</option>
+                  </NativeSelect.Field>
+                </NativeSelect.Root>
               </Field>
               <Field label="Default Value">
                 <Input
