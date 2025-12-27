@@ -49,6 +49,31 @@ curl -fsSL https://bun.sh/install | bash
    bun install
    ```
 
+### Database Migrations
+
+The project uses **Drizzle ORM** for database management. Run these commands from the `backend/` directory:
+
+```bash
+cd backend
+
+# Generate new migration files after changing src/db/schema.ts
+bun run db:generate
+
+# Run pending migrations
+bun run db:migrate
+
+# Push schema directly to database (bypasses migration files - useful for dev)
+bun run db:push
+
+# Open Drizzle Studio (visual database browser)
+bun run db:studio
+```
+
+**Typical workflow when changing the schema:**
+1. Edit `backend/src/db/schema.ts`
+2. Run `bun run db:generate` to create a migration file
+3. Run `bun run db:migrate` to apply the migration
+
 ### Running the App
 
 You need to run both the backend and frontend:
