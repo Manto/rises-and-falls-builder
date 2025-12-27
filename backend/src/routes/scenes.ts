@@ -10,6 +10,7 @@ import {
   locations,
   variables,
 } from "../db/schema";
+import { parseIntParam } from "../utils";
 
 const app = new Hono();
 
@@ -129,14 +130,21 @@ app.get("/", async (c) => {
 
 // GET /scenes/:id - Get a single scene with all relationships
 app.get("/:id", async (c) => {
-  const id = parseInt(c.req.param("id"));
-  const scene = await getFullScene(id);
+  try {
+    const id = parseIntParam(c.req.param("id"));
+    const scene = await getFullScene(id);
 
-  if (!scene) {
-    return c.json({ error: "Scene not found" }, 404);
+    if (!scene) {
+      return c.json({ error: "Scene not found" }, 404);
+    }
+
+    return c.json(scene);
+  } catch (error) {
+    if (error instanceof Response) {
+      return error;
+    }
+    throw error;
   }
-
-  return c.json(scene);
 });
 
 // POST /scenes - Create a new scene
@@ -221,26 +229,27 @@ app.post("/", async (c) => {
 
 // PUT /scenes/:id - Update a scene
 app.put("/:id", async (c) => {
-  const id = parseInt(c.req.param("id"));
-  const body = await c.req.json<{
-    name?: string;
-    locationId?: number | null;
-    what?: string;
-    characterIds?: number[];
-    preconditions?: { variableId: number; operator: ConditionOperator; value: number }[];
-    variableChanges?: { variableId: number; delta: number }[];
-  }>();
-  const timestamp = getCurrentTimestamp();
-
-  const existing = await db.query.scenes.findFirst({
-    where: eq(scenes.id, id),
-  });
-
-  if (!existing) {
-    return c.json({ error: "Scene not found" }, 404);
-  }
-
   try {
+    const id = parseIntParam(c.req.param("id"));
+    const body = await c.req.json<{
+      name?: string;
+      locationId?: number | null;
+      what?: string;
+      characterIds?: number[];
+      preconditions?: { variableId: number; operator: ConditionOperator; value: number }[];
+      variableChanges?: { variableId: number; delta: number }[];
+    }>();
+    const timestamp = getCurrentTimestamp();
+
+    const existing = await db.query.scenes.findFirst({
+      where: eq(scenes.id, id),
+    });
+
+    if (!existing) {
+      return c.json({ error: "Scene not found" }, 404);
+    }
+
+    try {
     sqliteDb.transaction(() => {
       // Update basic scene info
       db.update(scenes)
@@ -301,22 +310,35 @@ app.put("/:id", async (c) => {
     }
     throw error;
   }
+  } catch (error) {
+    if (error instanceof Response) {
+      return error;
+    }
+    throw error;
+  }
 });
 
 // DELETE /scenes/:id - Delete a scene
 app.delete("/:id", async (c) => {
-  const id = parseInt(c.req.param("id"));
+  try {
+    const id = parseIntParam(c.req.param("id"));
 
-  const existing = await db.query.scenes.findFirst({
-    where: eq(scenes.id, id),
-  });
+    const existing = await db.query.scenes.findFirst({
+      where: eq(scenes.id, id),
+    });
 
-  if (!existing) {
-    return c.json({ error: "Scene not found" }, 404);
+    if (!existing) {
+      return c.json({ error: "Scene not found" }, 404);
+    }
+
+    await db.delete(scenes).where(eq(scenes.id, id));
+    return c.json({ success: true });
+  } catch (error) {
+    if (error instanceof Response) {
+      return error;
+    }
+    throw error;
   }
-
-  await db.delete(scenes).where(eq(scenes.id, id));
-  return c.json({ success: true });
 });
 
 // POST /scenes/available - Get scenes that match current variable state
