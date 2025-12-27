@@ -2,6 +2,8 @@
 
 export type ConditionOperator = ">" | "<" | "=" | ">=" | "<=" | "!=";
 
+export type VariableType = "Character" | "World State" | "Knowledge";
+
 export interface Character {
   id: number;
   name: string;
@@ -33,6 +35,7 @@ export interface Variable {
   name: string;
   description: string;
   defaultValue: number;
+  type: VariableType;
   createdAt: string;
   updatedAt: string;
 }
@@ -41,6 +44,7 @@ export interface CreateVariableInput {
   name: string;
   description: string;
   defaultValue: number;
+  type: VariableType;
 }
 
 export interface Precondition {

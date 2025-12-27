@@ -1,54 +1,82 @@
 import { Hono } from "hono";
+import { eq } from "drizzle-orm";
 import { db, getCurrentTimestamp } from "../db";
-import type { LocationRow, Location, CreateLocationInput } from "../types";
+import { locations } from "../db/schema";
+import { parseIntParam } from "../utils";
 
-const locations = new Hono();
-
-// Transform database row to API response
-function toLocation(row: LocationRow): Location {
-  return {
-    id: row.id,
-    name: row.name,
-    blurb: row.blurb,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
+const app = new Hono();
 
 // GET /locations - List all locations
-locations.get("/", (c) => {
-  const rows = db.query("SELECT * FROM locations ORDER BY name").all() as LocationRow[];
-  return c.json(rows.map(toLocation));
+app.get("/", async (c) => {
+  const rows = await db.query.locations.findMany({
+    orderBy: (locations, { asc }) => [asc(locations.name)],
+  });
+
+  return c.json(
+    rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      blurb: row.blurb,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    }))
+  );
 });
 
 // GET /locations/:id - Get a single location
-locations.get("/:id", (c) => {
-  const id = parseInt(c.req.param("id"));
-  const row = db.query("SELECT * FROM locations WHERE id = ?").get(id) as LocationRow | null;
-  
-  if (!row) {
-    return c.json({ error: "Location not found" }, 404);
+app.get("/:id", async (c) => {
+  try {
+    const id = parseIntParam(c.req.param("id"));
+    const row = await db.query.locations.findFirst({
+      where: eq(locations.id, id),
+    });
+
+    if (!row) {
+      return c.json({ error: "Location not found" }, 404);
+    }
+
+    return c.json({
+      id: row.id,
+      name: row.name,
+      blurb: row.blurb,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    });
+  } catch (error) {
+    if (error instanceof Response) {
+      return error;
+    }
+    throw error;
   }
-  
-  return c.json(toLocation(row));
 });
 
 // POST /locations - Create a new location
-locations.post("/", async (c) => {
-  const body = await c.req.json<CreateLocationInput>();
-  
+app.post("/", async (c) => {
+  const body = await c.req.json<{ name: string; blurb?: string }>();
+
   if (!body.name || body.name.trim() === "") {
     return c.json({ error: "Name is required" }, 400);
   }
 
   try {
-    const result = db
-      .query(
-        "INSERT INTO locations (name, blurb) VALUES (?, ?) RETURNING *"
-      )
-      .get(body.name.trim(), body.blurb || "") as LocationRow;
+    const [result] = await db
+      .insert(locations)
+      .values({
+        name: body.name.trim(),
+        blurb: body.blurb || "",
+      })
+      .returning();
 
-    return c.json(toLocation(result), 201);
+    return c.json(
+      {
+        id: result.id,
+        name: result.name,
+        blurb: result.blurb,
+        createdAt: result.createdAt,
+        updatedAt: result.updatedAt,
+      },
+      201
+    );
   } catch (error: any) {
     if (error.message?.includes("UNIQUE constraint")) {
       return c.json({ error: "A location with this name already exists" }, 409);
@@ -58,49 +86,73 @@ locations.post("/", async (c) => {
 });
 
 // PUT /locations/:id - Update a location
-locations.put("/:id", async (c) => {
-  const id = parseInt(c.req.param("id"));
-  const body = await c.req.json<Partial<CreateLocationInput>>();
-  const timestamp = getCurrentTimestamp();
-
-  const existing = db.query("SELECT * FROM locations WHERE id = ?").get(id);
-  if (!existing) {
-    return c.json({ error: "Location not found" }, 404);
-  }
-
+app.put("/:id", async (c) => {
   try {
-    const result = db
-      .query(
-        `UPDATE locations 
-         SET name = COALESCE(?, name),
-             blurb = COALESCE(?, blurb),
-             updated_at = ?
-         WHERE id = ?
-         RETURNING *`
-      )
-      .get(body.name?.trim(), body.blurb, timestamp, id) as LocationRow;
+    const id = parseIntParam(c.req.param("id"));
+    const body = await c.req.json<{ name?: string; blurb?: string }>();
+    const timestamp = getCurrentTimestamp();
 
-    return c.json(toLocation(result));
-  } catch (error: any) {
-    if (error.message?.includes("UNIQUE constraint")) {
-      return c.json({ error: "A location with this name already exists" }, 409);
+    const existing = await db.query.locations.findFirst({
+      where: eq(locations.id, id),
+    });
+
+    if (!existing) {
+      return c.json({ error: "Location not found" }, 404);
+    }
+
+    try {
+      const [result] = await db
+        .update(locations)
+        .set({
+          name: body.name?.trim() ?? existing.name,
+          blurb: body.blurb ?? existing.blurb,
+          updatedAt: timestamp,
+        })
+        .where(eq(locations.id, id))
+        .returning();
+
+      return c.json({
+        id: result.id,
+        name: result.name,
+        blurb: result.blurb,
+        createdAt: result.createdAt,
+        updatedAt: result.updatedAt,
+      });
+    } catch (error: any) {
+      if (error.message?.includes("UNIQUE constraint")) {
+        return c.json({ error: "A location with this name already exists" }, 409);
+      }
+      throw error;
+    }
+  } catch (error) {
+    if (error instanceof Response) {
+      return error;
     }
     throw error;
   }
 });
 
 // DELETE /locations/:id - Delete a location
-locations.delete("/:id", (c) => {
-  const id = parseInt(c.req.param("id"));
-  
-  const existing = db.query("SELECT * FROM locations WHERE id = ?").get(id);
-  if (!existing) {
-    return c.json({ error: "Location not found" }, 404);
-  }
+app.delete("/:id", async (c) => {
+  try {
+    const id = parseIntParam(c.req.param("id"));
 
-  db.query("DELETE FROM locations WHERE id = ?").run(id);
-  return c.json({ success: true });
+    const existing = await db.query.locations.findFirst({
+      where: eq(locations.id, id),
+    });
+
+    if (!existing) {
+      return c.json({ error: "Location not found" }, 404);
+    }
+
+    await db.delete(locations).where(eq(locations.id, id));
+    return c.json({ success: true });
+  } catch (error) {
+    if (error instanceof Response) {
+      return error;
+    }
+    throw error;
+  }
 });
 
-export default locations;
-
+export default app;

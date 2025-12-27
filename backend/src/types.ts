@@ -1,146 +1,100 @@
-// ============================================
-// Database Row Types (what SQLite returns)
-// ============================================
-
-export interface CharacterRow {
-  id: number;
-  name: string;
-  blurb: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface LocationRow {
-  id: number;
-  name: string;
-  blurb: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface VariableRow {
-  id: number;
-  name: string;
-  description: string;
-  default_value: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface SceneRow {
-  id: number;
-  name: string;
-  location_id: number | null;
-  what: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface SceneCharacterRow {
-  scene_id: number;
-  character_id: number;
-}
-
-export interface PreconditionRow {
-  id: number;
-  scene_id: number;
-  variable_id: number;
-  operator: ConditionOperator;
-  value: number;
-}
-
-export interface VariableChangeRow {
-  id: number;
-  scene_id: number;
-  variable_id: number;
-  delta: number;
-}
+// Re-export types from Drizzle schema
+export type {
+  Character,
+  NewCharacter,
+  Location,
+  NewLocation,
+  Variable,
+  NewVariable,
+  Scene,
+  NewScene,
+  SceneCharacter,
+  NewSceneCharacter,
+  Precondition,
+  NewPrecondition,
+  VariableChange,
+  NewVariableChange,
+} from "./db/schema";
 
 // ============================================
-// API Types (what we send/receive from API)
+// API Input Types
 // ============================================
 
 export type ConditionOperator = ">" | "<" | "=" | ">=" | "<=" | "!=";
-
-export interface Character {
-  id: number;
-  name: string;
-  blurb: string;
-  createdAt: string;
-  updatedAt: string;
-}
+export type VariableType = "Character" | "World State" | "Knowledge";
 
 export interface CreateCharacterInput {
   name: string;
-  blurb: string;
-}
-
-export interface Location {
-  id: number;
-  name: string;
-  blurb: string;
-  createdAt: string;
-  updatedAt: string;
+  blurb?: string;
 }
 
 export interface CreateLocationInput {
   name: string;
-  blurb: string;
-}
-
-export interface Variable {
-  id: number;
-  name: string;
-  description: string;
-  defaultValue: number;
-  createdAt: string;
-  updatedAt: string;
+  blurb?: string;
 }
 
 export interface CreateVariableInput {
   name: string;
-  description: string;
-  defaultValue: number;
+  description?: string;
+  defaultValue?: number;
+  type?: VariableType;
 }
 
-export interface Precondition {
-  id?: number;
+export interface PreconditionInput {
   variableId: number;
-  variableName?: string;
   operator: ConditionOperator;
   value: number;
 }
 
-export interface VariableChange {
-  id?: number;
+export interface VariableChangeInput {
   variableId: number;
-  variableName?: string;
   delta: number;
 }
 
-export interface Scene {
+export interface CreateSceneInput {
+  name: string;
+  locationId?: number | null;
+  what?: string;
+  characterIds?: number[];
+  preconditions?: PreconditionInput[];
+  variableChanges?: VariableChangeInput[];
+}
+
+export interface UpdateSceneInput extends Partial<CreateSceneInput> {}
+
+// ============================================
+// API Response Types (with joined data)
+// ============================================
+
+export interface FullScene {
   id: number;
   name: string;
   locationId: number | null;
   locationName?: string;
   what: string;
-  characters: Character[];
-  preconditions: Precondition[];
-  variableChanges: VariableChange[];
+  characters: {
+    id: number;
+    name: string;
+    blurb: string;
+    createdAt: string;
+    updatedAt: string;
+  }[];
+  preconditions: {
+    id: number;
+    variableId: number;
+    variableName: string;
+    operator: string;
+    value: number;
+  }[];
+  variableChanges: {
+    id: number;
+    variableId: number;
+    variableName: string;
+    delta: number;
+  }[];
   createdAt: string;
   updatedAt: string;
 }
-
-export interface CreateSceneInput {
-  name: string;
-  locationId: number | null;
-  what: string;
-  characterIds: number[];
-  preconditions: Omit<Precondition, "id" | "variableName">[];
-  variableChanges: Omit<VariableChange, "id" | "variableName">[];
-}
-
-export interface UpdateSceneInput extends Partial<CreateSceneInput> {}
 
 // ============================================
 // Playthrough Types (for later)
@@ -151,4 +105,3 @@ export interface PlaythroughState {
   variables: Record<number, number>; // variableId -> current value
   visitedSceneIds: number[];
 }
-
