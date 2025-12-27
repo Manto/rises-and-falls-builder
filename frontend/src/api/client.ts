@@ -108,3 +108,76 @@ export const scenesApi = {
     }),
 };
 
+// Import types
+export interface ImportableItem {
+  id: string;
+  name: string;
+  blurb: string;
+  source: "notion" | "ai-generated";
+  sourceUrl?: string;
+}
+
+export interface ImportResult {
+  imported: { name: string; id: number }[];
+  skipped: { name: string; reason: string }[];
+}
+
+// Import API (Notion - uses server-side token from .env, or optional override)
+export const importApi = {
+  // Check if Notion is configured
+  status: () =>
+    request<{ configured: boolean; provider: string }>("/import/notion/status"),
+  fetchNotionCharacter: (pageUrl: string, notionToken?: string) =>
+    request<{ character: ImportableItem }>("/import/notion/character", {
+      method: "POST",
+      body: JSON.stringify({ pageUrl, notionToken }),
+    }),
+  fetchNotionCharacters: (pageUrl: string, notionToken?: string) =>
+    request<{ characters: ImportableItem[] }>("/import/notion/characters", {
+      method: "POST",
+      body: JSON.stringify({ pageUrl, notionToken }),
+    }),
+  fetchNotionLocations: (pageUrl: string, notionToken?: string) =>
+    request<{ locations: ImportableItem[] }>("/import/notion/locations", {
+      method: "POST",
+      body: JSON.stringify({ pageUrl, notionToken }),
+    }),
+  importCharacters: (items: ImportableItem[]) =>
+    request<ImportResult>("/import/characters/batch", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    }),
+  importLocations: (items: ImportableItem[]) =>
+    request<ImportResult>("/import/locations/batch", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    }),
+};
+
+// Generate API (AI - uses server-side Claude key)
+export const generateApi = {
+  // Check if AI generation is configured
+  status: () =>
+    request<{ configured: boolean; provider: string; model: string }>("/generate/status"),
+  characters: (prompt: string, count: number) =>
+    request<{ characters: ImportableItem[] }>("/generate/characters", {
+      method: "POST",
+      body: JSON.stringify({ prompt, count }),
+    }),
+  locations: (prompt: string, count: number) =>
+    request<{ locations: ImportableItem[] }>("/generate/locations", {
+      method: "POST",
+      body: JSON.stringify({ prompt, count }),
+    }),
+  importCharacters: (items: ImportableItem[]) =>
+    request<ImportResult>("/generate/characters/import", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    }),
+  importLocations: (items: ImportableItem[]) =>
+    request<ImportResult>("/generate/locations/import", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    }),
+};
+

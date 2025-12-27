@@ -11,12 +11,14 @@ import { ScenesPage } from "./pages/ScenesPage";
 import { CharactersPage } from "./pages/CharactersPage";
 import { LocationsPage } from "./pages/LocationsPage";
 import { VariablesPage } from "./pages/VariablesPage";
+import { ImportPage } from "./pages/ImportPage";
 
 const navItems = [
   { path: "/", label: "Scenes", end: true },
   { path: "/characters", label: "Characters" },
   { path: "/locations", label: "Locations" },
   { path: "/variables", label: "Variables" },
+  { path: "/import", label: "Import & Generate" },
 ];
 
 function NavItem({ path, label, end }: { path: string; label: string; end?: boolean }) {
@@ -100,6 +102,7 @@ function App() {
             <Route path="/characters" element={<CharactersPage />} />
             <Route path="/locations" element={<LocationsPage />} />
             <Route path="/variables" element={<VariablesPage />} />
+            <Route path="/import" element={<ImportPage />} />
           </Routes>
         </Container>
       </Box>

@@ -1,0 +1,87 @@
+---
+description: Rules for generating characters, locations, and scenes from Rises and Falls Notion content
+globs: ["**/*"]
+alwaysApply: false
+---
+
+# Notion to Rises & Falls Generation Rules
+
+When the user asks to generate content from their Notion pages, follow these guidelines:
+
+## Notion Page URL
+Main story hub: https://www.notion.so/Rises-and-Falls-1e1fa78c8ddb80e29aeae731802310dc
+
+## Character Extraction
+
+When extracting characters from Notion pages:
+
+1. **Name**: Use the character's full name without emojis or role descriptions
+   - "👌 Jason Nakamura - Digital Investigator" → "Jason Nakamura"
+   
+2. **Blurb**: Create a 1-2 sentence summary capturing:
+   - Their role in the story
+   - Key personality trait or background
+   - Their relationship to the world/themes
+   - Max 200 characters for conciseness
+
+3. **Source Mapping**:
+   - Major characters have dedicated pages (marked with 👌)
+   - Minor characters are mentioned within other pages
+   - Always note the source Notion page for reference
+
+## Location Extraction
+
+When extracting locations from World Setting or story pages:
+
+1. **Name**: Use the place name, optionally with year context
+   - "San Francisco (2065)" or just "San Francisco"
+   
+2. **Blurb**: Capture:
+   - Physical description and atmosphere
+   - Role in the story/world
+   - Who frequents or lives there
+   - Max 200 characters
+
+3. **Types of Locations**:
+   - Cities/Districts (San Francisco, Oakland, Fruitvale)
+   - Buildings (Highland Hospital, Prometheus HQ)
+   - Establishments (Haiyun's Kitchen, Father Benedict's Center)
+   - Organizations can be treated as locations if they have physical presence
+
+## Scene Generation
+
+When generating scenes from story arcs or character pages:
+
+1. **Name**: Brief, evocative scene title
+   - "Jason's First Case" or "Celeste Awakens"
+   
+2. **What**: Description of what happens in the scene
+   - Can be extracted from narrative text
+   - Or composed from character interactions described
+   
+3. **Relationships**:
+   - Assign characters present in the scene
+   - Assign location if identifiable
+   - Note any variable changes implied by the narrative
+
+## Variable Mapping
+
+From character pages, extract potential variables:
+- General: `stress`, `fatigue`, `inspiration`
+- Relationship: `trust`, `respect`, `closeness`, `empathy`
+- Character-specific: `appeal_to_humanity` (Jason)
+
+## Workflow
+
+1. **Fetch** the relevant Notion page(s) using MCP
+2. **Parse** content according to these rules
+3. **Preview** extracted entities before creating
+4. **Create** via the backend API endpoints
+5. **Confirm** what was added
+
+## Important Notes
+
+- Always preview generated content before committing to database
+- Preserve the noir/dystopian tone of the source material
+- Keep blurbs concise but evocative
+- Mark entities with their Notion source for future reference
