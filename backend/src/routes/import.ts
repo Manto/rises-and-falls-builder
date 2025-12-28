@@ -4,12 +4,19 @@ import { characters, locations } from "../db/schema";
 
 const importRoutes = new Hono();
 
+// Configuration
+const CLAUDE_MODEL = "claude-sonnet-4-20250514";
+
 // Types for import operations
 interface NotionPage {
   id: string;
   title: string;
   url: string;
   content?: string;
+}
+
+interface NotionPageWithChildren extends NotionPage {
+  childPages: { id: string; title: string }[];
 }
 
 interface ImportableCharacter {
@@ -28,8 +35,179 @@ interface ImportableLocation {
   sourceUrl?: string;
 }
 
+interface ExploredPage {
+  id: string;
+  title: string;
+  depth: number;
+  classification: string;
+  confidence: number;
+  childCount: number;
+  charactersExtracted: number;
+  locationsExtracted: number;
+  discoveredVia?: string; // How was this page discovered (child_page, link_to_page, database, mention)
+}
+
+interface ExplorationResult {
+  characters: ImportableCharacter[];
+  locations: ImportableLocation[];
+  exploration: {
+    pagesScanned: number;
+    characterPagesFound: string[];
+    locationPagesFound: string[];
+    llmClassifications: number;
+    allPages: ExploredPage[];
+  };
+}
+
+// LLM classification result
+interface PageClassification {
+  type: "characters" | "locations" | "character_list" | "location_list" | "mixed" | "other";
+  confidence: number;
+  reasoning: string;
+  extractedItems?: {
+    characters?: { name: string; blurb: string }[];
+    locations?: { name: string; blurb: string }[];
+  };
+}
+
 // Notion API configuration
 const NOTION_API_BASE = "https://api.notion.com/v1";
+
+// Get API key from environment
+function getAnthropicKey(): string | null {
+  return process.env.ANTHROPIC_API_KEY || null;
+}
+
+// Claude API call for page classification
+async function callClaude(
+  systemPrompt: string,
+  userPrompt: string
+): Promise<string> {
+  const apiKey = getAnthropicKey();
+  if (!apiKey) {
+    throw new Error("ANTHROPIC_API_KEY not configured");
+  }
+  
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 2000,
+      system: systemPrompt,
+      messages: [
+        { role: "user", content: userPrompt },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.error?.message || `Claude API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const textContent = data.content?.find((c: any) => c.type === "text");
+  return textContent?.text || "";
+}
+
+// System prompt for page classification
+const CLASSIFICATION_SYSTEM_PROMPT = `You are an assistant that analyzes Notion page content to identify what type of content it contains for a storytelling/worldbuilding project.
+
+Analyze the page title and content to determine if the page contains:
+- "character_list": A list/index page containing multiple character entries or links to character pages
+- "characters": Individual character descriptions (1-3 characters described in detail)
+- "location_list": A list/index page containing multiple location entries or links to location pages  
+- "locations": Individual location descriptions (1-3 places described in detail)
+- "mixed": Contains both characters AND locations
+- "other": General content, plot, themes, worldbuilding notes, etc. that isn't specifically characters or locations
+
+For character_list or characters pages, also extract the characters if present.
+For location_list or locations pages, also extract the locations if present.
+For mixed pages, extract both.
+
+Output ONLY valid JSON in this exact format:
+{
+  "type": "character_list|characters|location_list|locations|mixed|other",
+  "confidence": 0.0-1.0,
+  "reasoning": "Brief explanation of classification",
+  "extractedItems": {
+    "characters": [{"name": "Name", "blurb": "1-2 sentence description"}],
+    "locations": [{"name": "Name", "blurb": "1-2 sentence description"}]
+  }
+}
+
+Only include extractedItems if you found actual characters or locations to extract.
+For list pages, try to extract basic info from the listings.
+Be generous in identifying characters (people, NPCs, protagonists) and locations (places, settings, areas).`;
+
+// Classify a page using LLM
+async function classifyPageWithLLM(page: NotionPageWithChildren): Promise<PageClassification> {
+  const childPageList = page.childPages.length > 0 
+    ? `\n\nChild pages:\n${page.childPages.map(c => `- ${c.title}`).join("\n")}`
+    : "";
+  
+  const contentPreview = page.content 
+    ? page.content.substring(0, 2000) 
+    : "(No text content)";
+  
+  const userPrompt = `Analyze this Notion page:
+
+Title: ${page.title}
+
+Content:
+${contentPreview}${childPageList}
+
+Classify what type of content this page contains and extract any characters or locations.`;
+
+  try {
+    const response = await callClaude(CLASSIFICATION_SYSTEM_PROMPT, userPrompt);
+    
+    // Parse JSON response
+    const jsonMatch = response.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.error("[LLM] Could not parse classification response:", response);
+      return { type: "other", confidence: 0, reasoning: "Failed to parse LLM response" };
+    }
+    
+    const parsed = JSON.parse(jsonMatch[0]);
+    return {
+      type: parsed.type || "other",
+      confidence: parsed.confidence || 0.5,
+      reasoning: parsed.reasoning || "",
+      extractedItems: parsed.extractedItems,
+    };
+  } catch (err) {
+    console.error("[LLM] Classification error:", err);
+    return { type: "other", confidence: 0, reasoning: `Error: ${err}` };
+  }
+}
+
+// Check if LLM is available
+function hasLLM(): boolean {
+  return !!getAnthropicKey();
+}
+
+// Fallback pattern-based classification when LLM is not available
+const CHARACTER_PAGE_PATTERNS = [
+  /character/i, /cast/i, /people/i, /protagonist/i, /antagonist/i,
+  /npc/i, /person/i, /roster/i, /dramatis\s*personae/i, /who/i,
+];
+
+const LOCATION_PAGE_PATTERNS = [
+  /location/i, /place/i, /world/i, /setting/i, /geography/i,
+  /map/i, /area/i, /region/i, /city/i, /town/i, /environment/i,
+];
+
+function fallbackClassifyPage(title: string): "characters" | "locations" | "other" {
+  if (CHARACTER_PAGE_PATTERNS.some(p => p.test(title))) return "characters";
+  if (LOCATION_PAGE_PATTERNS.some(p => p.test(title))) return "locations";
+  return "other";
+}
 
 // Get Notion token from environment or request
 function getNotionToken(requestToken?: string): string {
@@ -57,13 +235,103 @@ async function notionRequest(endpoint: string, token: string) {
   return response.json();
 }
 
-// Fetch and parse a Notion page
-async function fetchNotionPage(pageId: string, token: string): Promise<NotionPage> {
+// Fetch all blocks from a page (handles pagination)
+async function fetchAllBlocks(pageId: string, token: string): Promise<any[]> {
+  const allBlocks: any[] = [];
+  let cursor: string | undefined;
+  
+  do {
+    const endpoint = cursor 
+      ? `/blocks/${pageId}/children?page_size=100&start_cursor=${cursor}`
+      : `/blocks/${pageId}/children?page_size=100`;
+    
+    const response = await notionRequest(endpoint, token);
+    allBlocks.push(...response.results);
+    cursor = response.has_more ? response.next_cursor : undefined;
+  } while (cursor);
+  
+  return allBlocks;
+}
+
+// Recursively fetch all blocks including nested children
+async function fetchAllBlocksRecursive(pageId: string, token: string): Promise<any[]> {
+  const topLevelBlocks = await fetchAllBlocks(pageId, token);
+  const allBlocks: any[] = [];
+  
+  for (const block of topLevelBlocks) {
+    allBlocks.push(block);
+    
+    // If block has children, fetch them recursively
+    if (block.has_children && block.type !== "child_page" && block.type !== "child_database") {
+      try {
+        const childBlocks = await fetchAllBlocksRecursive(block.id, token);
+        allBlocks.push(...childBlocks);
+      } catch (err) {
+        console.error(`[Notion] Failed to fetch children of block ${block.id}:`, err);
+      }
+    }
+  }
+  
+  return allBlocks;
+}
+
+// Query all pages from a database
+async function fetchDatabasePages(databaseId: string, token: string): Promise<{ id: string; title: string }[]> {
+  const pages: { id: string; title: string }[] = [];
+  let cursor: string | undefined;
+  
+  try {
+    do {
+      const endpoint = `/databases/${databaseId}/query`;
+      const body: any = { page_size: 100 };
+      if (cursor) body.start_cursor = cursor;
+      
+      const response = await fetch(`${NOTION_API_BASE}${endpoint}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Notion-Version": "2022-06-28",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+      
+      if (!response.ok) {
+        console.error(`[Notion] Database query failed: ${response.status}`);
+        break;
+      }
+      
+      const data = await response.json();
+      
+      for (const page of data.results) {
+        // Extract title from database page
+        let title = "Untitled";
+        for (const key of Object.keys(page.properties || {})) {
+          const prop = page.properties[key];
+          if (prop.type === "title" && prop.title?.[0]?.plain_text) {
+            title = prop.title[0].plain_text;
+            break;
+          }
+        }
+        pages.push({ id: page.id, title });
+      }
+      
+      cursor = data.has_more ? data.next_cursor : undefined;
+    } while (cursor);
+  } catch (err) {
+    console.error(`[Notion] Failed to query database ${databaseId}:`, err);
+  }
+  
+  return pages;
+}
+
+// Fetch and parse a Notion page with child page info
+async function fetchNotionPageWithChildren(pageId: string, token: string): Promise<NotionPageWithChildren> {
   // Get page properties
   const page = await notionRequest(`/pages/${pageId}`, token);
   
-  // Get page content (blocks)
-  const blocks = await notionRequest(`/blocks/${pageId}/children?page_size=100`, token);
+  // Get page content (blocks) - recursively to find nested pages
+  const blocks = await fetchAllBlocksRecursive(pageId, token);
   
   // Extract title from page properties
   let title = "Untitled";
@@ -82,14 +350,150 @@ async function fetchNotionPage(pageId: string, token: string): Promise<NotionPag
     }
   }
   
-  // Extract text content from blocks
-  const content = extractTextFromBlocks(blocks.results);
+  // Extract text content and child pages from blocks
+  const textParts: string[] = [];
+  const childPages: { id: string; title: string }[] = [];
+  const seenPageIds = new Set<string>();
+  
+  console.log(`[Notion] Processing ${blocks.length} blocks for page "${title}"`);
+  
+  for (const block of blocks) {
+    const blockType = block.type;
+    const blockContent = block[blockType];
+    
+    // Log all block types for debugging
+    if (blockType !== "paragraph" && blockType !== "heading_1" && blockType !== "heading_2" && blockType !== "heading_3") {
+      console.log(`[Notion] Block type: ${blockType}, has_children: ${block.has_children}`);
+    }
+    
+    if (blockContent?.rich_text) {
+      const text = blockContent.rich_text.map((t: any) => t.plain_text).join("");
+      if (text.trim()) {
+        textParts.push(text);
+      }
+      
+      // Check for page mentions in rich_text
+      for (const textItem of blockContent.rich_text) {
+        if (textItem.type === "mention" && textItem.mention?.type === "page") {
+          const mentionedPageId = textItem.mention.page.id;
+          if (!seenPageIds.has(mentionedPageId)) {
+            seenPageIds.add(mentionedPageId);
+            childPages.push({
+              id: mentionedPageId,
+              title: textItem.plain_text || "Mentioned Page",
+            });
+            console.log(`[Notion] Found page mention: "${textItem.plain_text}" (${mentionedPageId})`);
+          }
+        }
+      }
+    }
+    
+    // Collect child pages
+    if (blockType === "child_page") {
+      if (!seenPageIds.has(block.id)) {
+        seenPageIds.add(block.id);
+        childPages.push({
+          id: block.id,
+          title: blockContent.title || "Untitled",
+        });
+        console.log(`[Notion] Found child_page: "${blockContent.title}" (${block.id})`);
+      }
+    }
+    
+    // Handle link_to_page blocks
+    if (blockType === "link_to_page") {
+      const linkedPageId = blockContent.page_id || blockContent.database_id;
+      if (linkedPageId && !seenPageIds.has(linkedPageId)) {
+        seenPageIds.add(linkedPageId);
+        // We need to fetch the page to get its title
+        try {
+          const linkedPage = await notionRequest(`/pages/${linkedPageId}`, token);
+          let linkedTitle = "Linked Page";
+          for (const key of Object.keys(linkedPage.properties || {})) {
+            const prop = linkedPage.properties[key];
+            if (prop.type === "title" && prop.title?.[0]?.plain_text) {
+              linkedTitle = prop.title[0].plain_text;
+              break;
+            }
+          }
+          childPages.push({
+            id: linkedPageId,
+            title: linkedTitle,
+          });
+          console.log(`[Notion] Found link_to_page: "${linkedTitle}" (${linkedPageId})`);
+        } catch (err) {
+          console.error(`[Notion] Failed to fetch linked page ${linkedPageId}:`, err);
+        }
+      }
+    }
+    
+    // Handle child databases - query to get all pages inside
+    if (blockType === "child_database") {
+      console.log(`[Notion] Found child_database: "${blockContent.title}" (${block.id})`);
+      const dbPages = await fetchDatabasePages(block.id, token);
+      for (const dbPage of dbPages) {
+        if (!seenPageIds.has(dbPage.id)) {
+          seenPageIds.add(dbPage.id);
+          childPages.push(dbPage);
+          console.log(`[Notion] Found database page: "${dbPage.title}" (${dbPage.id})`);
+        }
+      }
+    }
+    
+    // Handle linked_database (inline database view)
+    if (blockType === "linked_database") {
+      const dbId = blockContent.database_id;
+      if (dbId) {
+        console.log(`[Notion] Found linked_database: ${dbId}`);
+        const dbPages = await fetchDatabasePages(dbId, token);
+        for (const dbPage of dbPages) {
+          if (!seenPageIds.has(dbPage.id)) {
+            seenPageIds.add(dbPage.id);
+            childPages.push(dbPage);
+            console.log(`[Notion] Found linked database page: "${dbPage.title}" (${dbPage.id})`);
+          }
+        }
+      }
+    }
+    
+    // Handle synced_block - might contain pages
+    if (blockType === "synced_block" && blockContent.synced_from?.block_id) {
+      try {
+        const syncedBlocks = await fetchAllBlocks(blockContent.synced_from.block_id, token);
+        for (const syncedBlock of syncedBlocks) {
+          if (syncedBlock.type === "child_page" && !seenPageIds.has(syncedBlock.id)) {
+            seenPageIds.add(syncedBlock.id);
+            childPages.push({
+              id: syncedBlock.id,
+              title: syncedBlock.child_page?.title || "Synced Page",
+            });
+          }
+        }
+      } catch (err) {
+        console.error(`[Notion] Failed to fetch synced block:`, err);
+      }
+    }
+  }
+  
+  console.log(`[Notion] Found ${childPages.length} child pages for "${title}"`);
   
   return {
     id: pageId,
     title,
     url: page.url,
-    content,
+    content: textParts.join("\n"),
+    childPages,
+  };
+}
+
+// Fetch and parse a Notion page
+async function fetchNotionPage(pageId: string, token: string): Promise<NotionPage> {
+  const pageWithChildren = await fetchNotionPageWithChildren(pageId, token);
+  return {
+    id: pageWithChildren.id,
+    title: pageWithChildren.title,
+    url: pageWithChildren.url,
+    content: pageWithChildren.content,
   };
 }
 
@@ -117,11 +521,292 @@ function extractTextFromBlocks(blocks: any[]): string {
   return textParts.join("\n");
 }
 
+// Recursively explore a Notion page tree to find characters and locations using LLM
+async function exploreNotionPages(
+  pageId: string,
+  token: string,
+  maxDepth: number = 3,
+  currentDepth: number = 0,
+  visited: Set<string> = new Set()
+): Promise<ExplorationResult> {
+  const result: ExplorationResult = {
+    characters: [],
+    locations: [],
+    exploration: {
+      pagesScanned: 0,
+      characterPagesFound: [],
+      locationPagesFound: [],
+      llmClassifications: 0,
+      allPages: [],
+    },
+  };
+  
+  // Prevent infinite loops and respect depth limit
+  if (currentDepth > maxDepth || visited.has(pageId)) {
+    return result;
+  }
+  visited.add(pageId);
+  
+  const useLLM = hasLLM();
+  
+  try {
+    const page = await fetchNotionPageWithChildren(pageId, token);
+    result.exploration.pagesScanned++;
+    
+    console.log(`[Explore] Depth ${currentDepth}: "${page.title}" - ${page.childPages.length} children (LLM: ${useLLM})`);
+    
+    // Track this page
+    const exploredPage: ExploredPage = {
+      id: pageId,
+      title: page.title,
+      depth: currentDepth,
+      classification: "pending",
+      confidence: 0,
+      childCount: page.childPages.length,
+      charactersExtracted: 0,
+      locationsExtracted: 0,
+    };
+    
+    if (useLLM) {
+      // Use LLM to classify the page
+      const classification = await classifyPageWithLLM(page);
+      result.exploration.llmClassifications++;
+      
+      exploredPage.classification = classification.type;
+      exploredPage.confidence = classification.confidence;
+      
+      console.log(`[Explore] LLM classified "${page.title}" as ${classification.type} (${Math.round(classification.confidence * 100)}%)`);
+      
+      // Handle based on classification type
+      if (classification.type === "character_list" || classification.type === "characters" || classification.type === "mixed") {
+        result.exploration.characterPagesFound.push(page.title);
+        
+        // Extract characters directly from LLM response if available
+        if (classification.extractedItems?.characters) {
+          for (const char of classification.extractedItems.characters) {
+            result.characters.push({
+              id: `llm-${page.id}-${result.characters.length}`,
+              name: char.name,
+              blurb: char.blurb,
+              source: "notion",
+              sourceUrl: page.url,
+            });
+            exploredPage.charactersExtracted++;
+            console.log(`[Explore] LLM extracted character: "${char.name}"`);
+          }
+        }
+        
+        // For character_list pages, also check child pages
+        if (classification.type === "character_list") {
+          for (const child of page.childPages) {
+            try {
+              const childPage = await fetchNotionPageWithChildren(child.id, token);
+              result.exploration.pagesScanned++;
+              
+              const childClassification = await classifyPageWithLLM(childPage);
+              result.exploration.llmClassifications++;
+              
+              // Track child page
+              const childExploredPage: ExploredPage = {
+                id: child.id,
+                title: childPage.title,
+                depth: currentDepth + 1,
+                classification: childClassification.type,
+                confidence: childClassification.confidence,
+                childCount: childPage.childPages.length,
+                charactersExtracted: 0,
+                locationsExtracted: 0,
+              };
+              
+              if (childClassification.type === "characters" || childClassification.type === "mixed") {
+                if (childClassification.extractedItems?.characters) {
+                  for (const char of childClassification.extractedItems.characters) {
+                    result.characters.push({
+                      id: `llm-${childPage.id}-${result.characters.length}`,
+                      name: char.name,
+                      blurb: char.blurb,
+                      source: "notion",
+                      sourceUrl: childPage.url,
+                    });
+                    childExploredPage.charactersExtracted++;
+                    console.log(`[Explore] LLM extracted character from child: "${char.name}"`);
+                  }
+                }
+              }
+              
+              result.exploration.allPages.push(childExploredPage);
+              visited.add(child.id.replace(/-/g, ""));
+            } catch (err) {
+              console.error(`[Explore] Failed to process child page ${child.title}:`, err);
+            }
+          }
+        }
+      }
+      
+      if (classification.type === "location_list" || classification.type === "locations" || classification.type === "mixed") {
+        result.exploration.locationPagesFound.push(page.title);
+        
+        // Extract locations directly from LLM response if available
+        if (classification.extractedItems?.locations) {
+          for (const loc of classification.extractedItems.locations) {
+            result.locations.push({
+              id: `llm-${page.id}-${result.locations.length}`,
+              name: loc.name,
+              blurb: loc.blurb,
+              source: "notion",
+              sourceUrl: page.url,
+            });
+            exploredPage.locationsExtracted++;
+            console.log(`[Explore] LLM extracted location: "${loc.name}"`);
+          }
+        }
+        
+        // For location_list pages, also check child pages
+        if (classification.type === "location_list") {
+          for (const child of page.childPages) {
+            try {
+              const childPage = await fetchNotionPageWithChildren(child.id, token);
+              result.exploration.pagesScanned++;
+              
+              const childClassification = await classifyPageWithLLM(childPage);
+              result.exploration.llmClassifications++;
+              
+              // Track child page
+              const childExploredPage: ExploredPage = {
+                id: child.id,
+                title: childPage.title,
+                depth: currentDepth + 1,
+                classification: childClassification.type,
+                confidence: childClassification.confidence,
+                childCount: childPage.childPages.length,
+                charactersExtracted: 0,
+                locationsExtracted: 0,
+              };
+              
+              if (childClassification.type === "locations" || childClassification.type === "mixed") {
+                if (childClassification.extractedItems?.locations) {
+                  for (const loc of childClassification.extractedItems.locations) {
+                    result.locations.push({
+                      id: `llm-${childPage.id}-${result.locations.length}`,
+                      name: loc.name,
+                      blurb: loc.blurb,
+                      source: "notion",
+                      sourceUrl: childPage.url,
+                    });
+                    childExploredPage.locationsExtracted++;
+                    console.log(`[Explore] LLM extracted location from child: "${loc.name}"`);
+                  }
+                }
+              }
+              
+              result.exploration.allPages.push(childExploredPage);
+              visited.add(child.id.replace(/-/g, ""));
+            } catch (err) {
+              console.error(`[Explore] Failed to process child page ${child.title}:`, err);
+            }
+          }
+        }
+      }
+      
+      // Add current page to tracking
+      result.exploration.allPages.push(exploredPage);
+      
+      // For "other" pages or low confidence, recurse to find nested content
+      // ALWAYS recurse into children to ensure we don't miss anything
+      for (const child of page.childPages) {
+        const childIdClean = child.id.replace(/-/g, "");
+        if (!visited.has(childIdClean)) {
+          const childResult = await exploreNotionPages(
+            childIdClean,
+            token,
+            maxDepth,
+            currentDepth + 1,
+            visited
+          );
+          
+          result.characters.push(...childResult.characters);
+          result.locations.push(...childResult.locations);
+          result.exploration.pagesScanned += childResult.exploration.pagesScanned;
+          result.exploration.characterPagesFound.push(...childResult.exploration.characterPagesFound);
+          result.exploration.locationPagesFound.push(...childResult.exploration.locationPagesFound);
+          result.exploration.llmClassifications += childResult.exploration.llmClassifications;
+          result.exploration.allPages.push(...childResult.exploration.allPages);
+        }
+      }
+    } else {
+      // Fallback: Use pattern-based classification when LLM is not available
+      console.log(`[Explore] Using fallback pattern matching for "${page.title}"`);
+      
+      const classification = fallbackClassifyPage(page.title);
+      exploredPage.classification = classification;
+      exploredPage.confidence = 1; // Pattern matching is binary
+      
+      if (classification === "characters") {
+        result.exploration.characterPagesFound.push(page.title);
+        for (const child of page.childPages) {
+          try {
+            const childPage = await fetchNotionPage(child.id, token);
+            result.exploration.pagesScanned++;
+            const character = parseCharacterFromNotionPage(childPage);
+            result.characters.push(character);
+            exploredPage.charactersExtracted++;
+          } catch (err) {
+            console.error(`[Explore] Failed to fetch character page:`, err);
+          }
+        }
+      } else if (classification === "locations") {
+        result.exploration.locationPagesFound.push(page.title);
+        for (const child of page.childPages) {
+          try {
+            const childPage = await fetchNotionPage(child.id, token);
+            result.exploration.pagesScanned++;
+            const location = parseLocationFromNotionPage(childPage);
+            result.locations.push(location);
+            exploredPage.locationsExtracted++;
+          } catch (err) {
+            console.error(`[Explore] Failed to fetch location page:`, err);
+          }
+        }
+      }
+      
+      // Add current page to tracking
+      result.exploration.allPages.push(exploredPage);
+      
+      // Recurse for all pages
+      for (const child of page.childPages) {
+        const childIdClean = child.id.replace(/-/g, "");
+        if (!visited.has(childIdClean)) {
+          const childResult = await exploreNotionPages(
+            childIdClean,
+            token,
+            maxDepth,
+            currentDepth + 1,
+            visited
+          );
+          
+          result.characters.push(...childResult.characters);
+          result.locations.push(...childResult.locations);
+          result.exploration.pagesScanned += childResult.exploration.pagesScanned;
+          result.exploration.characterPagesFound.push(...childResult.exploration.characterPagesFound);
+          result.exploration.locationPagesFound.push(...childResult.exploration.locationPagesFound);
+          result.exploration.llmClassifications += childResult.exploration.llmClassifications;
+          result.exploration.allPages.push(...childResult.exploration.allPages);
+        }
+      }
+    }
+    
+  } catch (err) {
+    console.error(`[Explore] Failed to fetch page ${pageId}:`, err);
+  }
+  
+  return result;
+}
+
 // Parse character data from Notion page
 function parseCharacterFromNotionPage(page: NotionPage): ImportableCharacter {
   // Clean up title - remove emojis and role descriptions
   let name = page.title
-    .replace(/^[👌🚧📝✅❌🔥💡🎯]\s*/g, "") // Remove status emojis
+    .replace(/^[👌🚧📝✅❌🔥💡🎯🎭👤👥📍🏠🌍🏢🏭]\s*/g, "") // Remove status emojis
     .replace(/\s*-\s*.+$/, "") // Remove " - Role Description"
     .trim();
   
@@ -150,7 +835,41 @@ function parseCharacterFromNotionPage(page: NotionPage): ImportableCharacter {
   };
 }
 
-// Parse location data from content
+// Parse location data from a single Notion page
+function parseLocationFromNotionPage(page: NotionPage): ImportableLocation {
+  // Clean up title - remove emojis
+  let name = page.title
+    .replace(/^[👌🚧📝✅❌🔥💡🎯📍🏠🌍🏢🏭🗺️]\s*/g, "") // Remove status emojis
+    .replace(/\s*-\s*.+$/, "") // Remove " - Description suffix"
+    .trim();
+  
+  // Generate blurb from content (first 200 chars or first paragraph)
+  let blurb = "";
+  if (page.content) {
+    const lines = page.content.split("\n").filter(l => l.trim());
+    // Skip status callouts and page references
+    const meaningfulLines = lines.filter(l => 
+      !l.startsWith("Status:") && 
+      !l.startsWith("[Page:") &&
+      !l.startsWith("[Database:") &&
+      l.length > 10
+    );
+    if (meaningfulLines.length > 0) {
+      blurb = meaningfulLines[0].substring(0, 200);
+      if (meaningfulLines[0].length > 200) blurb += "...";
+    }
+  }
+  
+  return {
+    id: page.id,
+    name,
+    blurb,
+    source: "notion",
+    sourceUrl: page.url,
+  };
+}
+
+// Parse location data from content (legacy pattern-based extraction)
 function parseLocationsFromContent(content: string, sourceUrl?: string): ImportableLocation[] {
   const locations: ImportableLocation[] = [];
   
@@ -279,6 +998,101 @@ importRoutes.post("/notion/locations", async (c) => {
     }, 500);
   }
 });
+
+// Explore a Notion page tree to find characters and locations
+importRoutes.post("/notion/explore", async (c) => {
+  const body = await c.req.json();
+  const { notionToken: requestToken, pageUrl, maxDepth = 3 } = body;
+  
+  if (!pageUrl) {
+    return c.json({ error: "Page URL is required" }, 400);
+  }
+  
+  try {
+    const token = getNotionToken(requestToken);
+    const pageId = extractPageIdFromUrl(pageUrl);
+    
+    console.log(`[Explore] Starting exploration from page ${pageId} with maxDepth ${maxDepth}`);
+    
+    const result = await exploreNotionPages(pageId, token, maxDepth);
+    
+    // Deduplicate by name
+    const uniqueCharacters = deduplicateByName(result.characters);
+    const uniqueLocations = deduplicateByName(result.locations);
+    
+    console.log(`[Explore] Complete: ${uniqueCharacters.length} characters, ${uniqueLocations.length} locations`);
+    
+    return c.json({
+      characters: uniqueCharacters,
+      locations: uniqueLocations,
+      exploration: result.exploration,
+    });
+  } catch (error) {
+    console.error("Notion explore error:", error);
+    return c.json({ 
+      error: error instanceof Error ? error.message : "Failed to explore Notion" 
+    }, 500);
+  }
+});
+
+// Preview page structure without full extraction
+importRoutes.post("/notion/preview", async (c) => {
+  const body = await c.req.json();
+  const { notionToken: requestToken, pageUrl } = body;
+  
+  if (!pageUrl) {
+    return c.json({ error: "Page URL is required" }, 400);
+  }
+  
+  try {
+    const token = getNotionToken(requestToken);
+    const pageId = extractPageIdFromUrl(pageUrl);
+    const page = await fetchNotionPageWithChildren(pageId, token);
+    
+    const useLLM = hasLLM();
+    let pageClassification: PageClassification | null = null;
+    
+    // Use LLM to classify the main page if available
+    if (useLLM) {
+      pageClassification = await classifyPageWithLLM(page);
+    }
+    
+    // Classify children (use fallback patterns if no LLM)
+    const children = page.childPages.map(child => ({
+      id: child.id,
+      title: child.title,
+      type: fallbackClassifyPage(child.title),
+    }));
+    
+    return c.json({
+      title: page.title,
+      url: page.url,
+      classification: pageClassification,
+      children,
+      hints: {
+        characterContainers: children.filter(c => c.type === "characters").map(c => c.title),
+        locationContainers: children.filter(c => c.type === "locations").map(c => c.title),
+      },
+      llmEnabled: useLLM,
+    });
+  } catch (error) {
+    console.error("Notion preview error:", error);
+    return c.json({ 
+      error: error instanceof Error ? error.message : "Failed to preview Notion page" 
+    }, 500);
+  }
+});
+
+// Helper to deduplicate items by name
+function deduplicateByName<T extends { name: string }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  return items.filter(item => {
+    const key = item.name.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 // Import selected characters into database
 importRoutes.post("/characters/batch", async (c) => {

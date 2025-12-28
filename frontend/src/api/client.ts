@@ -122,6 +122,52 @@ export interface ImportResult {
   skipped: { name: string; reason: string }[];
 }
 
+export interface ExploredPage {
+  id: string;
+  title: string;
+  depth: number;
+  classification: string;
+  confidence: number;
+  childCount: number;
+  charactersExtracted: number;
+  locationsExtracted: number;
+  discoveredVia?: string;
+}
+
+export interface ExplorationResult {
+  characters: ImportableItem[];
+  locations: ImportableItem[];
+  exploration: {
+    pagesScanned: number;
+    characterPagesFound: string[];
+    locationPagesFound: string[];
+    llmClassifications: number;
+    allPages: ExploredPage[];
+  };
+}
+
+export interface PageClassification {
+  type: "characters" | "locations" | "character_list" | "location_list" | "mixed" | "other";
+  confidence: number;
+  reasoning: string;
+}
+
+export interface PagePreview {
+  title: string;
+  url: string;
+  classification?: PageClassification;
+  children: {
+    id: string;
+    title: string;
+    type: "characters" | "locations" | "other";
+  }[];
+  hints: {
+    characterContainers: string[];
+    locationContainers: string[];
+  };
+  llmEnabled: boolean;
+}
+
 // Import API (Notion - uses server-side token from .env, or optional override)
 export const importApi = {
   // Check if Notion is configured
@@ -139,6 +185,18 @@ export const importApi = {
     }),
   fetchNotionLocations: (pageUrl: string, notionToken?: string) =>
     request<{ locations: ImportableItem[] }>("/import/notion/locations", {
+      method: "POST",
+      body: JSON.stringify({ pageUrl, notionToken }),
+    }),
+  // Explore a page tree recursively to find characters and locations
+  exploreNotion: (pageUrl: string, maxDepth?: number, notionToken?: string) =>
+    request<ExplorationResult>("/import/notion/explore", {
+      method: "POST",
+      body: JSON.stringify({ pageUrl, maxDepth, notionToken }),
+    }),
+  // Preview page structure without full extraction
+  previewNotion: (pageUrl: string, notionToken?: string) =>
+    request<PagePreview>("/import/notion/preview", {
       method: "POST",
       body: JSON.stringify({ pageUrl, notionToken }),
     }),
