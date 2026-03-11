@@ -5,6 +5,8 @@ import characters from "./routes/characters";
 import locations from "./routes/locations";
 import variables from "./routes/variables";
 import scenes from "./routes/scenes";
+import importRoutes from "./routes/import";
+import generateRoutes from "./routes/generate";
 
 // Create the app
 const app = new Hono();
@@ -34,6 +36,8 @@ app.route("/api/characters", characters);
 app.route("/api/locations", locations);
 app.route("/api/variables", variables);
 app.route("/api/scenes", scenes);
+app.route("/api/import", importRoutes);
+app.route("/api/generate", generateRoutes);
 
 // Error handling
 app.onError((err, c) => {

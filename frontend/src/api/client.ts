@@ -108,3 +108,155 @@ export const scenesApi = {
     }),
 };
 
+// Import types
+export interface ImportableItem {
+  id: string;
+  name: string;
+  blurb: string;
+  source: "notion" | "ai-generated";
+  sourceUrl?: string;
+}
+
+export interface ImportResult {
+  imported: { name: string; id: number; updated?: boolean }[];
+  skipped?: { name: string; reason: string }[];
+  failed?: { name: string; reason: string }[];
+}
+
+export interface ExploredPage {
+  id: string;
+  title: string;
+  depth: number;
+  classification: string;
+  confidence: number;
+  childCount: number;
+  charactersExtracted: number;
+  locationsExtracted: number;
+  discoveredVia?: string;
+}
+
+export interface ExplorationResult {
+  characters: ImportableItem[];
+  locations: ImportableItem[];
+  exploration: {
+    pagesScanned: number;
+    characterPagesFound: string[];
+    locationPagesFound: string[];
+    llmClassifications: number;
+    allPages: ExploredPage[];
+  };
+}
+
+export interface ExploreJobProgress {
+  pagesScanned: number;
+  currentPage: string;
+  charactersFound: number;
+  locationsFound: number;
+  llmClassifications: number;
+}
+
+export interface ExploreJobStatus {
+  jobId: string;
+  status: "running" | "completed" | "failed";
+  progress: ExploreJobProgress;
+  elapsedMs: number;
+  result?: ExplorationResult;
+  error?: string;
+}
+
+export interface PageClassification {
+  type: "characters" | "locations" | "character_list" | "location_list" | "mixed" | "other";
+  confidence: number;
+  reasoning: string;
+}
+
+export interface PagePreview {
+  title: string;
+  url: string;
+  classification?: PageClassification;
+  children: {
+    id: string;
+    title: string;
+    type: "characters" | "locations" | "other";
+  }[];
+  hints: {
+    characterContainers: string[];
+    locationContainers: string[];
+  };
+  llmEnabled: boolean;
+}
+
+// Import API (Notion - uses server-side token from .env, or optional override)
+export const importApi = {
+  // Check if Notion is configured
+  status: () =>
+    request<{ configured: boolean; provider: string }>("/import/notion/status"),
+  fetchNotionCharacter: (pageUrl: string, notionToken?: string) =>
+    request<{ character: ImportableItem }>("/import/notion/character", {
+      method: "POST",
+      body: JSON.stringify({ pageUrl, notionToken }),
+    }),
+  fetchNotionCharacters: (pageUrl: string, notionToken?: string) =>
+    request<{ characters: ImportableItem[] }>("/import/notion/characters", {
+      method: "POST",
+      body: JSON.stringify({ pageUrl, notionToken }),
+    }),
+  fetchNotionLocations: (pageUrl: string, notionToken?: string) =>
+    request<{ locations: ImportableItem[] }>("/import/notion/locations", {
+      method: "POST",
+      body: JSON.stringify({ pageUrl, notionToken }),
+    }),
+  // Start exploring a page tree (returns job ID)
+  startExplore: (pageUrl: string, maxDepth?: number, notionToken?: string) =>
+    request<{ jobId: string }>("/import/notion/explore", {
+      method: "POST",
+      body: JSON.stringify({ pageUrl, maxDepth, notionToken }),
+    }),
+  // Poll exploration job status
+  pollExplore: (jobId: string) =>
+    request<ExploreJobStatus>(`/import/notion/explore/${jobId}`),
+  // Preview page structure without full extraction
+  previewNotion: (pageUrl: string, notionToken?: string) =>
+    request<PagePreview>("/import/notion/preview", {
+      method: "POST",
+      body: JSON.stringify({ pageUrl, notionToken }),
+    }),
+  importCharacters: (items: ImportableItem[]) =>
+    request<ImportResult>("/import/characters/batch", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    }),
+  importLocations: (items: ImportableItem[]) =>
+    request<ImportResult>("/import/locations/batch", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    }),
+};
+
+// Generate API (AI - uses server-side Claude key)
+export const generateApi = {
+  // Check if AI generation is configured
+  status: () =>
+    request<{ configured: boolean; provider: string; model: string }>("/generate/status"),
+  characters: (prompt: string, count: number) =>
+    request<{ characters: ImportableItem[] }>("/generate/characters", {
+      method: "POST",
+      body: JSON.stringify({ prompt, count }),
+    }),
+  locations: (prompt: string, count: number) =>
+    request<{ locations: ImportableItem[] }>("/generate/locations", {
+      method: "POST",
+      body: JSON.stringify({ prompt, count }),
+    }),
+  importCharacters: (items: ImportableItem[]) =>
+    request<ImportResult>("/generate/characters/import", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    }),
+  importLocations: (items: ImportableItem[]) =>
+    request<ImportResult>("/generate/locations/import", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    }),
+};
+
