@@ -1,11 +1,53 @@
 import { Hono } from "hono";
+import { sql } from "drizzle-orm";
 import { db } from "../db";
 import { characters, locations } from "../db/schema";
 
 const importRoutes = new Hono();
 
 // Configuration
-const CLAUDE_MODEL = "claude-sonnet-4-20250514";
+const CLAUDE_MODEL = "claude-opus-4-6";
+
+// ========================================
+// Background Job Store
+// ========================================
+
+type ExploreJobStatus = "running" | "completed" | "failed";
+
+interface ExploreJobProgress {
+  pagesScanned: number;
+  currentPage: string;
+  charactersFound: number;
+  locationsFound: number;
+  llmClassifications: number;
+}
+
+interface ExploreJob {
+  id: string;
+  status: ExploreJobStatus;
+  progress: ExploreJobProgress;
+  result?: ExplorationResult & { characters: ImportableCharacter[]; locations: ImportableLocation[] };
+  error?: string;
+  startedAt: number;
+  completedAt?: number;
+}
+
+const exploreJobs = new Map<string, ExploreJob>();
+
+const JOB_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+function cleanupOldJobs() {
+  const now = Date.now();
+  for (const [id, job] of exploreJobs) {
+    if (job.completedAt && now - job.completedAt > JOB_TTL_MS) {
+      exploreJobs.delete(id);
+    }
+  }
+}
+
+function generateJobId(): string {
+  return `explore-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+}
 
 // Types for import operations
 interface NotionPage {
@@ -130,14 +172,16 @@ For character_list or characters pages, also extract the characters if present.
 For location_list or locations pages, also extract the locations if present.
 For mixed pages, extract both.
 
+IMPORTANT: When writing a "blurb" for each extracted character or location, synthesize the actual page content into a rich, informative summary of 3-4 sentences. The blurb should capture who the character is (role, personality, motivations, key relationships) or what the location is (atmosphere, significance, notable features). Use details from the page content — don't just restate the title.
+
 Output ONLY valid JSON in this exact format:
 {
   "type": "character_list|characters|location_list|locations|mixed|other",
   "confidence": 0.0-1.0,
   "reasoning": "Brief explanation of classification",
   "extractedItems": {
-    "characters": [{"name": "Name", "blurb": "1-2 sentence description"}],
-    "locations": [{"name": "Name", "blurb": "1-2 sentence description"}]
+    "characters": [{"name": "Name", "blurb": "3-4 sentence description drawn from page content"}],
+    "locations": [{"name": "Name", "blurb": "3-4 sentence description drawn from page content"}]
   }
 }
 
@@ -152,7 +196,7 @@ async function classifyPageWithLLM(page: NotionPageWithChildren): Promise<PageCl
     : "";
   
   const contentPreview = page.content 
-    ? page.content.substring(0, 2000) 
+    ? page.content.substring(0, 4000) 
     : "(No text content)";
   
   const userPrompt = `Analyze this Notion page:
@@ -521,13 +565,36 @@ function extractTextFromBlocks(blocks: any[]): string {
   return textParts.join("\n");
 }
 
+// Run async tasks with limited concurrency
+async function parallelMap<T, R>(
+  items: T[],
+  fn: (item: T) => Promise<R>,
+  concurrency: number
+): Promise<R[]> {
+  const results: R[] = [];
+  let index = 0;
+
+  async function worker() {
+    while (index < items.length) {
+      const i = index++;
+      results[i] = await fn(items[i]);
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+  return results;
+}
+
+const CONCURRENCY = 3;
+
 // Recursively explore a Notion page tree to find characters and locations using LLM
 async function exploreNotionPages(
   pageId: string,
   token: string,
   maxDepth: number = 3,
   currentDepth: number = 0,
-  visited: Set<string> = new Set()
+  visited: Set<string> = new Set(),
+  job?: ExploreJob
 ): Promise<ExplorationResult> {
   const result: ExplorationResult = {
     characters: [],
@@ -540,22 +607,31 @@ async function exploreNotionPages(
       allPages: [],
     },
   };
-  
-  // Prevent infinite loops and respect depth limit
+
   if (currentDepth > maxDepth || visited.has(pageId)) {
     return result;
   }
   visited.add(pageId);
-  
+
   const useLLM = hasLLM();
-  
+
+  // Increment job progress directly — never overwrite with local counts
+  function tickJob(field: "pagesScanned" | "charactersFound" | "locationsFound" | "llmClassifications", delta = 1) {
+    if (!job) return;
+    (job.progress[field] as number) += delta;
+  }
+  function setCurrentPage(name: string) {
+    if (job) job.progress.currentPage = name;
+  }
+
   try {
     const page = await fetchNotionPageWithChildren(pageId, token);
     result.exploration.pagesScanned++;
-    
+    tickJob("pagesScanned");
+    setCurrentPage(page.title);
+
     console.log(`[Explore] Depth ${currentDepth}: "${page.title}" - ${page.childPages.length} children (LLM: ${useLLM})`);
-    
-    // Track this page
+
     const exploredPage: ExploredPage = {
       id: pageId,
       title: page.title,
@@ -566,22 +642,21 @@ async function exploreNotionPages(
       charactersExtracted: 0,
       locationsExtracted: 0,
     };
-    
+
     if (useLLM) {
-      // Use LLM to classify the page
       const classification = await classifyPageWithLLM(page);
       result.exploration.llmClassifications++;
-      
+      tickJob("llmClassifications");
+
       exploredPage.classification = classification.type;
       exploredPage.confidence = classification.confidence;
-      
+
       console.log(`[Explore] LLM classified "${page.title}" as ${classification.type} (${Math.round(classification.confidence * 100)}%)`);
-      
-      // Handle based on classification type
+
+      // Extract characters from this page's classification
       if (classification.type === "character_list" || classification.type === "characters" || classification.type === "mixed") {
         result.exploration.characterPagesFound.push(page.title);
-        
-        // Extract characters directly from LLM response if available
+
         if (classification.extractedItems?.characters) {
           for (const char of classification.extractedItems.characters) {
             result.characters.push({
@@ -592,21 +667,26 @@ async function exploreNotionPages(
               sourceUrl: page.url,
             });
             exploredPage.charactersExtracted++;
-            console.log(`[Explore] LLM extracted character: "${char.name}"`);
+            tickJob("charactersFound");
           }
         }
-        
-        // For character_list pages, also check child pages
+
+        // For list pages, classify children in parallel
         if (classification.type === "character_list") {
-          for (const child of page.childPages) {
+          const unvisitedChildren = page.childPages.filter(c => !visited.has(c.id.replace(/-/g, "")));
+          unvisitedChildren.forEach(c => visited.add(c.id.replace(/-/g, "")));
+
+          await parallelMap(unvisitedChildren, async (child) => {
             try {
               const childPage = await fetchNotionPageWithChildren(child.id, token);
               result.exploration.pagesScanned++;
-              
+              tickJob("pagesScanned");
+              setCurrentPage(childPage.title);
+
               const childClassification = await classifyPageWithLLM(childPage);
               result.exploration.llmClassifications++;
-              
-              // Track child page
+              tickJob("llmClassifications");
+
               const childExploredPage: ExploredPage = {
                 id: child.id,
                 title: childPage.title,
@@ -617,7 +697,7 @@ async function exploreNotionPages(
                 charactersExtracted: 0,
                 locationsExtracted: 0,
               };
-              
+
               if (childClassification.type === "characters" || childClassification.type === "mixed") {
                 if (childClassification.extractedItems?.characters) {
                   for (const char of childClassification.extractedItems.characters) {
@@ -629,24 +709,23 @@ async function exploreNotionPages(
                       sourceUrl: childPage.url,
                     });
                     childExploredPage.charactersExtracted++;
-                    console.log(`[Explore] LLM extracted character from child: "${char.name}"`);
+                    tickJob("charactersFound");
                   }
                 }
               }
-              
+
               result.exploration.allPages.push(childExploredPage);
-              visited.add(child.id.replace(/-/g, ""));
             } catch (err) {
               console.error(`[Explore] Failed to process child page ${child.title}:`, err);
             }
-          }
+          }, CONCURRENCY);
         }
       }
-      
+
+      // Extract locations from this page's classification
       if (classification.type === "location_list" || classification.type === "locations" || classification.type === "mixed") {
         result.exploration.locationPagesFound.push(page.title);
-        
-        // Extract locations directly from LLM response if available
+
         if (classification.extractedItems?.locations) {
           for (const loc of classification.extractedItems.locations) {
             result.locations.push({
@@ -657,21 +736,26 @@ async function exploreNotionPages(
               sourceUrl: page.url,
             });
             exploredPage.locationsExtracted++;
-            console.log(`[Explore] LLM extracted location: "${loc.name}"`);
+            tickJob("locationsFound");
           }
         }
-        
-        // For location_list pages, also check child pages
+
+        // For list pages, classify children in parallel
         if (classification.type === "location_list") {
-          for (const child of page.childPages) {
+          const unvisitedChildren = page.childPages.filter(c => !visited.has(c.id.replace(/-/g, "")));
+          unvisitedChildren.forEach(c => visited.add(c.id.replace(/-/g, "")));
+
+          await parallelMap(unvisitedChildren, async (child) => {
             try {
               const childPage = await fetchNotionPageWithChildren(child.id, token);
               result.exploration.pagesScanned++;
-              
+              tickJob("pagesScanned");
+              setCurrentPage(childPage.title);
+
               const childClassification = await classifyPageWithLLM(childPage);
               result.exploration.llmClassifications++;
-              
-              // Track child page
+              tickJob("llmClassifications");
+
               const childExploredPage: ExploredPage = {
                 id: child.id,
                 title: childPage.title,
@@ -682,7 +766,7 @@ async function exploreNotionPages(
                 charactersExtracted: 0,
                 locationsExtracted: 0,
               };
-              
+
               if (childClassification.type === "locations" || childClassification.type === "mixed") {
                 if (childClassification.extractedItems?.locations) {
                   for (const loc of childClassification.extractedItems.locations) {
@@ -694,137 +778,148 @@ async function exploreNotionPages(
                       sourceUrl: childPage.url,
                     });
                     childExploredPage.locationsExtracted++;
-                    console.log(`[Explore] LLM extracted location from child: "${loc.name}"`);
+                    tickJob("locationsFound");
                   }
                 }
               }
-              
+
               result.exploration.allPages.push(childExploredPage);
-              visited.add(child.id.replace(/-/g, ""));
             } catch (err) {
               console.error(`[Explore] Failed to process child page ${child.title}:`, err);
             }
-          }
+          }, CONCURRENCY);
         }
       }
-      
-      // Add current page to tracking
+
       result.exploration.allPages.push(exploredPage);
-      
-      // For "other" pages or low confidence, recurse to find nested content
-      // ALWAYS recurse into children to ensure we don't miss anything
-      for (const child of page.childPages) {
-        const childIdClean = child.id.replace(/-/g, "");
-        if (!visited.has(childIdClean)) {
-          const childResult = await exploreNotionPages(
-            childIdClean,
-            token,
-            maxDepth,
-            currentDepth + 1,
-            visited
-          );
-          
-          result.characters.push(...childResult.characters);
-          result.locations.push(...childResult.locations);
-          result.exploration.pagesScanned += childResult.exploration.pagesScanned;
-          result.exploration.characterPagesFound.push(...childResult.exploration.characterPagesFound);
-          result.exploration.locationPagesFound.push(...childResult.exploration.locationPagesFound);
-          result.exploration.llmClassifications += childResult.exploration.llmClassifications;
-          result.exploration.allPages.push(...childResult.exploration.allPages);
-        }
-      }
+
+      // Recurse into unvisited children in parallel
+      const unvisitedRecurse = page.childPages
+        .map(c => ({ ...c, cleanId: c.id.replace(/-/g, "") }))
+        .filter(c => !visited.has(c.cleanId));
+
+      await parallelMap(unvisitedRecurse, async (child) => {
+        const childResult = await exploreNotionPages(
+          child.cleanId, token, maxDepth, currentDepth + 1, visited, job
+        );
+        result.characters.push(...childResult.characters);
+        result.locations.push(...childResult.locations);
+        result.exploration.pagesScanned += childResult.exploration.pagesScanned;
+        result.exploration.characterPagesFound.push(...childResult.exploration.characterPagesFound);
+        result.exploration.locationPagesFound.push(...childResult.exploration.locationPagesFound);
+        result.exploration.llmClassifications += childResult.exploration.llmClassifications;
+        result.exploration.allPages.push(...childResult.exploration.allPages);
+      }, CONCURRENCY);
+
     } else {
-      // Fallback: Use pattern-based classification when LLM is not available
-      console.log(`[Explore] Using fallback pattern matching for "${page.title}"`);
-      
+      // Fallback: pattern-based classification
       const classification = fallbackClassifyPage(page.title);
       exploredPage.classification = classification;
-      exploredPage.confidence = 1; // Pattern matching is binary
-      
+      exploredPage.confidence = 1;
+
       if (classification === "characters") {
         result.exploration.characterPagesFound.push(page.title);
-        for (const child of page.childPages) {
+        await parallelMap(page.childPages, async (child) => {
           try {
             const childPage = await fetchNotionPage(child.id, token);
             result.exploration.pagesScanned++;
+            tickJob("pagesScanned");
+            setCurrentPage(childPage.title);
             const character = parseCharacterFromNotionPage(childPage);
             result.characters.push(character);
             exploredPage.charactersExtracted++;
+            tickJob("charactersFound");
           } catch (err) {
             console.error(`[Explore] Failed to fetch character page:`, err);
           }
-        }
+        }, CONCURRENCY);
       } else if (classification === "locations") {
         result.exploration.locationPagesFound.push(page.title);
-        for (const child of page.childPages) {
+        await parallelMap(page.childPages, async (child) => {
           try {
             const childPage = await fetchNotionPage(child.id, token);
             result.exploration.pagesScanned++;
+            tickJob("pagesScanned");
+            setCurrentPage(childPage.title);
             const location = parseLocationFromNotionPage(childPage);
             result.locations.push(location);
             exploredPage.locationsExtracted++;
+            tickJob("locationsFound");
           } catch (err) {
             console.error(`[Explore] Failed to fetch location page:`, err);
           }
-        }
+        }, CONCURRENCY);
       }
-      
-      // Add current page to tracking
+
       result.exploration.allPages.push(exploredPage);
-      
-      // Recurse for all pages
-      for (const child of page.childPages) {
-        const childIdClean = child.id.replace(/-/g, "");
-        if (!visited.has(childIdClean)) {
-          const childResult = await exploreNotionPages(
-            childIdClean,
-            token,
-            maxDepth,
-            currentDepth + 1,
-            visited
-          );
-          
-          result.characters.push(...childResult.characters);
-          result.locations.push(...childResult.locations);
-          result.exploration.pagesScanned += childResult.exploration.pagesScanned;
-          result.exploration.characterPagesFound.push(...childResult.exploration.characterPagesFound);
-          result.exploration.locationPagesFound.push(...childResult.exploration.locationPagesFound);
-          result.exploration.llmClassifications += childResult.exploration.llmClassifications;
-          result.exploration.allPages.push(...childResult.exploration.allPages);
-        }
-      }
+
+      // Recurse for unvisited children in parallel
+      const unvisitedRecurse = page.childPages
+        .map(c => ({ ...c, cleanId: c.id.replace(/-/g, "") }))
+        .filter(c => !visited.has(c.cleanId));
+
+      await parallelMap(unvisitedRecurse, async (child) => {
+        const childResult = await exploreNotionPages(
+          child.cleanId, token, maxDepth, currentDepth + 1, visited, job
+        );
+        result.characters.push(...childResult.characters);
+        result.locations.push(...childResult.locations);
+        result.exploration.pagesScanned += childResult.exploration.pagesScanned;
+        result.exploration.characterPagesFound.push(...childResult.exploration.characterPagesFound);
+        result.exploration.locationPagesFound.push(...childResult.exploration.locationPagesFound);
+        result.exploration.llmClassifications += childResult.exploration.llmClassifications;
+        result.exploration.allPages.push(...childResult.exploration.allPages);
+      }, CONCURRENCY);
     }
-    
+
   } catch (err) {
     console.error(`[Explore] Failed to fetch page ${pageId}:`, err);
   }
-  
+
   return result;
+}
+
+// Build a 3-4 sentence blurb from page content lines
+function buildBlurbFromContent(content: string): string {
+  const lines = content.split("\n").filter(l => l.trim());
+  const meaningfulLines = lines.filter(l => 
+    !l.startsWith("Status:") && 
+    !l.startsWith("[Page:") &&
+    !l.startsWith("[Database:") &&
+    l.length > 15
+  );
+  
+  if (meaningfulLines.length === 0) return "";
+  
+  // Collect sentences from meaningful lines until we have 3-4
+  const sentences: string[] = [];
+  for (const line of meaningfulLines) {
+    const lineSentences = line.match(/[^.!?]+[.!?]+/g) || [line];
+    for (const s of lineSentences) {
+      const trimmed = s.trim();
+      if (trimmed.length > 10) {
+        sentences.push(trimmed);
+      }
+      if (sentences.length >= 4) break;
+    }
+    if (sentences.length >= 4) break;
+  }
+  
+  if (sentences.length === 0) {
+    return meaningfulLines[0].substring(0, 300);
+  }
+  
+  return sentences.join(" ").substring(0, 600);
 }
 
 // Parse character data from Notion page
 function parseCharacterFromNotionPage(page: NotionPage): ImportableCharacter {
-  // Clean up title - remove emojis and role descriptions
   let name = page.title
-    .replace(/^[👌🚧📝✅❌🔥💡🎯🎭👤👥📍🏠🌍🏢🏭]\s*/g, "") // Remove status emojis
-    .replace(/\s*-\s*.+$/, "") // Remove " - Role Description"
+    .replace(/^[👌🚧📝✅❌🔥💡🎯🎭👤👥📍🏠🌍🏢🏭]\s*/g, "")
+    .replace(/\s*-\s*.+$/, "")
     .trim();
   
-  // Generate blurb from content (first 200 chars or first paragraph)
-  let blurb = "";
-  if (page.content) {
-    const lines = page.content.split("\n").filter(l => l.trim());
-    // Skip status callouts
-    const meaningfulLines = lines.filter(l => 
-      !l.startsWith("Status:") && 
-      !l.startsWith("[Page:") &&
-      l.length > 20
-    );
-    if (meaningfulLines.length > 0) {
-      blurb = meaningfulLines[0].substring(0, 200);
-      if (meaningfulLines[0].length > 200) blurb += "...";
-    }
-  }
+  const blurb = page.content ? buildBlurbFromContent(page.content) : "";
   
   return {
     id: page.id,
@@ -837,28 +932,12 @@ function parseCharacterFromNotionPage(page: NotionPage): ImportableCharacter {
 
 // Parse location data from a single Notion page
 function parseLocationFromNotionPage(page: NotionPage): ImportableLocation {
-  // Clean up title - remove emojis
   let name = page.title
-    .replace(/^[👌🚧📝✅❌🔥💡🎯📍🏠🌍🏢🏭🗺️]\s*/g, "") // Remove status emojis
-    .replace(/\s*-\s*.+$/, "") // Remove " - Description suffix"
+    .replace(/^[👌🚧📝✅❌🔥💡🎯📍🏠🌍🏢🏭🗺️]\s*/g, "")
+    .replace(/\s*-\s*.+$/, "")
     .trim();
   
-  // Generate blurb from content (first 200 chars or first paragraph)
-  let blurb = "";
-  if (page.content) {
-    const lines = page.content.split("\n").filter(l => l.trim());
-    // Skip status callouts and page references
-    const meaningfulLines = lines.filter(l => 
-      !l.startsWith("Status:") && 
-      !l.startsWith("[Page:") &&
-      !l.startsWith("[Database:") &&
-      l.length > 10
-    );
-    if (meaningfulLines.length > 0) {
-      blurb = meaningfulLines[0].substring(0, 200);
-      if (meaningfulLines[0].length > 200) blurb += "...";
-    }
-  }
+  const blurb = page.content ? buildBlurbFromContent(page.content) : "";
   
   return {
     id: page.id,
@@ -999,7 +1078,7 @@ importRoutes.post("/notion/locations", async (c) => {
   }
 });
 
-// Explore a Notion page tree to find characters and locations
+// Start exploring a Notion page tree (returns job ID immediately)
 importRoutes.post("/notion/explore", async (c) => {
   const body = await c.req.json();
   const { notionToken: requestToken, pageUrl, maxDepth = 3 } = body;
@@ -1012,27 +1091,85 @@ importRoutes.post("/notion/explore", async (c) => {
     const token = getNotionToken(requestToken);
     const pageId = extractPageIdFromUrl(pageUrl);
     
-    console.log(`[Explore] Starting exploration from page ${pageId} with maxDepth ${maxDepth}`);
+    cleanupOldJobs();
     
-    const result = await exploreNotionPages(pageId, token, maxDepth);
+    const jobId = generateJobId();
+    const job: ExploreJob = {
+      id: jobId,
+      status: "running",
+      progress: {
+        pagesScanned: 0,
+        currentPage: "",
+        charactersFound: 0,
+        locationsFound: 0,
+        llmClassifications: 0,
+      },
+      startedAt: Date.now(),
+    };
+    exploreJobs.set(jobId, job);
     
-    // Deduplicate by name
-    const uniqueCharacters = deduplicateByName(result.characters);
-    const uniqueLocations = deduplicateByName(result.locations);
+    console.log(`[Explore] Job ${jobId}: Starting exploration from page ${pageId} with maxDepth ${maxDepth}`);
     
-    console.log(`[Explore] Complete: ${uniqueCharacters.length} characters, ${uniqueLocations.length} locations`);
+    // Run exploration in the background (don't await)
+    exploreNotionPages(pageId, token, maxDepth, 0, new Set(), job)
+      .then((result) => {
+        const uniqueCharacters = deduplicateByName(result.characters);
+        const uniqueLocations = deduplicateByName(result.locations);
+        
+        job.status = "completed";
+        job.completedAt = Date.now();
+        job.result = {
+          characters: uniqueCharacters,
+          locations: uniqueLocations,
+          exploration: result.exploration,
+        };
+        job.progress.charactersFound = uniqueCharacters.length;
+        job.progress.locationsFound = uniqueLocations.length;
+        job.progress.pagesScanned = result.exploration.pagesScanned;
+        
+        console.log(`[Explore] Job ${jobId}: Complete — ${uniqueCharacters.length} characters, ${uniqueLocations.length} locations`);
+      })
+      .catch((error) => {
+        job.status = "failed";
+        job.completedAt = Date.now();
+        job.error = error instanceof Error ? error.message : "Unknown error";
+        console.error(`[Explore] Job ${jobId}: Failed —`, error);
+      });
     
-    return c.json({
-      characters: uniqueCharacters,
-      locations: uniqueLocations,
-      exploration: result.exploration,
-    });
+    return c.json({ jobId });
   } catch (error) {
     console.error("Notion explore error:", error);
     return c.json({ 
-      error: error instanceof Error ? error.message : "Failed to explore Notion" 
+      error: error instanceof Error ? error.message : "Failed to start exploration" 
     }, 500);
   }
+});
+
+// Poll exploration job status
+importRoutes.get("/notion/explore/:jobId", async (c) => {
+  const jobId = c.req.param("jobId");
+  const job = exploreJobs.get(jobId);
+  
+  if (!job) {
+    return c.json({ error: "Job not found" }, 404);
+  }
+  
+  const response: any = {
+    jobId: job.id,
+    status: job.status,
+    progress: job.progress,
+    elapsedMs: (job.completedAt || Date.now()) - job.startedAt,
+  };
+  
+  if (job.status === "completed" && job.result) {
+    response.result = job.result;
+  }
+  
+  if (job.status === "failed") {
+    response.error = job.error;
+  }
+  
+  return c.json(response);
 });
 
 // Preview page structure without full extraction
@@ -1094,7 +1231,7 @@ function deduplicateByName<T extends { name: string }>(items: T[]): T[] {
   });
 }
 
-// Import selected characters into database
+// Import selected characters into database (upsert: update existing on conflict)
 importRoutes.post("/characters/batch", async (c) => {
   const body = await c.req.json();
   const { items } = body as { items: ImportableCharacter[] };
@@ -1104,27 +1241,32 @@ importRoutes.post("/characters/batch", async (c) => {
   }
   
   try {
-    const imported: { name: string; id: number }[] = [];
-    const skipped: { name: string; reason: string }[] = [];
+    const imported: { name: string; id: number; updated: boolean }[] = [];
+    const failed: { name: string; reason: string }[] = [];
     
     for (const item of items) {
       try {
         const result = db
           .insert(characters)
           .values({ name: item.name, blurb: item.blurb })
+          .onConflictDoUpdate({
+            target: characters.name,
+            set: {
+              blurb: item.blurb,
+              updatedAt: sql`(datetime('now'))`,
+            },
+          })
           .returning()
           .get();
-        imported.push({ name: result.name, id: result.id });
+        
+        const wasUpdated = result.createdAt !== result.updatedAt;
+        imported.push({ name: result.name, id: result.id, updated: wasUpdated });
       } catch (err: any) {
-        if (err.message?.includes("UNIQUE constraint failed")) {
-          skipped.push({ name: item.name, reason: "Already exists" });
-        } else {
-          skipped.push({ name: item.name, reason: err.message || "Unknown error" });
-        }
+        failed.push({ name: item.name, reason: err.message || "Unknown error" });
       }
     }
     
-    return c.json({ imported, skipped });
+    return c.json({ imported, failed });
   } catch (error) {
     console.error("Batch import error:", error);
     return c.json({ 
@@ -1133,7 +1275,7 @@ importRoutes.post("/characters/batch", async (c) => {
   }
 });
 
-// Import selected locations into database
+// Import selected locations into database (upsert: update existing on conflict)
 importRoutes.post("/locations/batch", async (c) => {
   const body = await c.req.json();
   const { items } = body as { items: ImportableLocation[] };
@@ -1143,27 +1285,32 @@ importRoutes.post("/locations/batch", async (c) => {
   }
   
   try {
-    const imported: { name: string; id: number }[] = [];
-    const skipped: { name: string; reason: string }[] = [];
+    const imported: { name: string; id: number; updated: boolean }[] = [];
+    const failed: { name: string; reason: string }[] = [];
     
     for (const item of items) {
       try {
         const result = db
           .insert(locations)
           .values({ name: item.name, blurb: item.blurb })
+          .onConflictDoUpdate({
+            target: locations.name,
+            set: {
+              blurb: item.blurb,
+              updatedAt: sql`(datetime('now'))`,
+            },
+          })
           .returning()
           .get();
-        imported.push({ name: result.name, id: result.id });
+        
+        const wasUpdated = result.createdAt !== result.updatedAt;
+        imported.push({ name: result.name, id: result.id, updated: wasUpdated });
       } catch (err: any) {
-        if (err.message?.includes("UNIQUE constraint failed")) {
-          skipped.push({ name: item.name, reason: "Already exists" });
-        } else {
-          skipped.push({ name: item.name, reason: err.message || "Unknown error" });
-        }
+        failed.push({ name: item.name, reason: err.message || "Unknown error" });
       }
     }
     
-    return c.json({ imported, skipped });
+    return c.json({ imported, failed });
   } catch (error) {
     console.error("Batch import error:", error);
     return c.json({ 

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Box,
   Button,
@@ -39,6 +39,7 @@ import {
   type ImportResult,
   type ExplorationResult,
   type ExploredPage,
+  type ExploreJobProgress,
 } from "../api/client";
 
 type EntityType = "characters" | "locations" | "explore";
@@ -80,6 +81,9 @@ export function ImportPage() {
   const [exploreDepth, setExploreDepth] = useState(3);
   const [selectedCharacterIds, setSelectedCharacterIds] = useState<Set<string>>(new Set());
   const [selectedLocationIds, setSelectedLocationIds] = useState<Set<string>>(new Set());
+  const [exploreProgress, setExploreProgress] = useState<ExploreJobProgress | null>(null);
+  const [exploreElapsed, setExploreElapsed] = useState(0);
+  const exploreAbortRef = useRef(false);
 
   // Loading states
   const [fetching, setFetching] = useState(false);
@@ -165,7 +169,7 @@ export function ImportPage() {
     setEditingItem(null);
   }
 
-  // Explore Notion page tree
+  // Explore Notion page tree (background job with polling)
   async function exploreNotion() {
     if (!notionConfigured) {
       toaster.error({ 
@@ -179,13 +183,55 @@ export function ImportPage() {
       return;
     }
 
+    exploreAbortRef.current = false;
     setFetching(true);
     setExplorationResult(null);
+    setExploreProgress(null);
+    setExploreElapsed(0);
+
     try {
-      const result = await importApi.exploreNotion(notionPageUrl, exploreDepth);
-      setExplorationResult(result);
+      const { jobId } = await importApi.startExplore(notionPageUrl, exploreDepth);
       
-      // Auto-select all found items
+      const MAX_RETRIES = 5;
+      let consecutiveErrors = 0;
+
+      const poll = async (): Promise<ExplorationResult> => {
+        while (!exploreAbortRef.current) {
+          await new Promise((r) => setTimeout(r, 1500));
+          if (exploreAbortRef.current) throw new Error("Cancelled");
+
+          try {
+            const status = await importApi.pollExplore(jobId);
+            consecutiveErrors = 0;
+
+            setExploreProgress(status.progress);
+            setExploreElapsed(status.elapsedMs);
+
+            if (status.status === "completed" && status.result) {
+              return status.result;
+            }
+            if (status.status === "failed") {
+              throw new Error(status.error || "Exploration failed");
+            }
+          } catch (err) {
+            if (err instanceof Error && err.message === "Cancelled") throw err;
+            if (err instanceof Error && err.message.includes("Exploration failed")) throw err;
+
+            consecutiveErrors++;
+            console.warn(`[Explore poll] Error ${consecutiveErrors}/${MAX_RETRIES}:`, err);
+            if (consecutiveErrors >= MAX_RETRIES) {
+              throw new Error("Lost connection to exploration job");
+            }
+            await new Promise((r) => setTimeout(r, 2000));
+          }
+        }
+        throw new Error("Cancelled");
+      };
+
+      const result = await poll();
+      if (exploreAbortRef.current) return;
+
+      setExplorationResult(result);
       setSelectedCharacterIds(new Set(result.characters.map(c => c.id)));
       setSelectedLocationIds(new Set(result.locations.map(l => l.id)));
 
@@ -202,14 +248,23 @@ export function ImportPage() {
         });
       }
     } catch (err) {
+      if (exploreAbortRef.current) return;
       toaster.error({
         title: "Exploration failed",
         description: err instanceof Error ? err.message : "Unknown error",
       });
     } finally {
-      setFetching(false);
+      if (!exploreAbortRef.current) {
+        setFetching(false);
+        setExploreProgress(null);
+      }
     }
   }
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => { exploreAbortRef.current = true; };
+  }, []);
 
   // Toggle selection for exploration
   function toggleCharacterSelection(id: string) {
@@ -261,16 +316,24 @@ export function ImportPage() {
         return next;
       });
 
-      if (result.imported.length > 0) {
+      const newItems = result.imported.filter(i => !i.updated);
+      const updatedItems = result.imported.filter(i => i.updated);
+      if (newItems.length > 0) {
         toaster.success({
-          title: `Imported ${result.imported.length} characters`,
-          description: result.imported.map(i => i.name).join(", "),
+          title: `Imported ${newItems.length} new characters`,
+          description: newItems.map(i => i.name).join(", "),
         });
       }
-      if (result.skipped.length > 0) {
-        toaster.info({
-          title: `Skipped ${result.skipped.length} characters`,
-          description: result.skipped.map(s => `${s.name}: ${s.reason}`).join(", "),
+      if (updatedItems.length > 0) {
+        toaster.success({
+          title: `Updated ${updatedItems.length} existing characters`,
+          description: updatedItems.map(i => i.name).join(", "),
+        });
+      }
+      if (result.failed && result.failed.length > 0) {
+        toaster.error({
+          title: `Failed to import ${result.failed.length} characters`,
+          description: result.failed.map(s => `${s.name}: ${s.reason}`).join(", "),
         });
       }
     } catch (err) {
@@ -296,7 +359,6 @@ export function ImportPage() {
     try {
       const result = await importApi.importLocations(selected);
       
-      // Remove imported items from selection
       const importedIds = new Set(result.imported.map(i => i.name));
       setSelectedLocationIds(prev => {
         const next = new Set(prev);
@@ -308,16 +370,24 @@ export function ImportPage() {
         return next;
       });
 
-      if (result.imported.length > 0) {
+      const newItems = result.imported.filter(i => !i.updated);
+      const updatedItems = result.imported.filter(i => i.updated);
+      if (newItems.length > 0) {
         toaster.success({
-          title: `Imported ${result.imported.length} locations`,
-          description: result.imported.map(i => i.name).join(", "),
+          title: `Imported ${newItems.length} new locations`,
+          description: newItems.map(i => i.name).join(", "),
         });
       }
-      if (result.skipped.length > 0) {
-        toaster.info({
-          title: `Skipped ${result.skipped.length} locations`,
-          description: result.skipped.map(s => `${s.name}: ${s.reason}`).join(", "),
+      if (updatedItems.length > 0) {
+        toaster.success({
+          title: `Updated ${updatedItems.length} existing locations`,
+          description: updatedItems.map(i => i.name).join(", "),
+        });
+      }
+      if (result.failed && result.failed.length > 0) {
+        toaster.error({
+          title: `Failed to import ${result.failed.length} locations`,
+          description: result.failed.map(s => `${s.name}: ${s.reason}`).join(", "),
         });
       }
     } catch (err) {
@@ -461,16 +531,24 @@ export function ImportPage() {
       });
 
       // Show results
-      if (result.imported.length > 0) {
+      const newItems = result.imported.filter(i => !i.updated);
+      const updatedItems = result.imported.filter(i => i.updated);
+      if (newItems.length > 0) {
         toaster.success({
-          title: `Imported ${result.imported.length} ${entityType}`,
-          description: result.imported.map((i) => i.name).join(", "),
+          title: `Imported ${newItems.length} new ${entityType}`,
+          description: newItems.map((i) => i.name).join(", "),
         });
       }
-      if (result.skipped.length > 0) {
-        toaster.info({
-          title: `Skipped ${result.skipped.length} ${entityType}`,
-          description: result.skipped
+      if (updatedItems.length > 0) {
+        toaster.success({
+          title: `Updated ${updatedItems.length} existing ${entityType}`,
+          description: updatedItems.map((i) => i.name).join(", "),
+        });
+      }
+      if (result.failed && result.failed.length > 0) {
+        toaster.error({
+          title: `Failed to import ${result.failed.length} ${entityType}`,
+          description: result.failed
             .map((s) => `${s.name}: ${s.reason}`)
             .join(", "),
         });
@@ -679,11 +757,46 @@ export function ImportPage() {
           >
             <Card.Body p={4}>
               {fetching ? (
-                <Flex justify="center" align="center" py={16} direction="column" gap={3}>
+                <Flex justify="center" align="center" py={16} direction="column" gap={4}>
                   <Spinner size="lg" color="teal.500" />
-                  <Text fontSize="sm" color="fg.muted">
-                    Exploring page tree...
-                  </Text>
+                  <VStack gap={1}>
+                    <Text fontSize="sm" fontWeight="medium" color="fg.DEFAULT">
+                      Exploring page tree...
+                    </Text>
+                    {exploreProgress && (
+                      <>
+                        {exploreProgress.currentPage && (
+                          <Text fontSize="xs" color="fg.muted" maxW="350px" textAlign="center" truncate>
+                            Scanning: {exploreProgress.currentPage}
+                          </Text>
+                        )}
+                        <HStack gap={4} mt={2}>
+                          <VStack gap={0}>
+                            <Text fontSize="lg" fontWeight="bold" color="teal.400">
+                              {exploreProgress.pagesScanned}
+                            </Text>
+                            <Text fontSize="xs" color="fg.muted">pages</Text>
+                          </VStack>
+                          <VStack gap={0}>
+                            <Text fontSize="lg" fontWeight="bold" color="blue.400">
+                              {exploreProgress.charactersFound}
+                            </Text>
+                            <Text fontSize="xs" color="fg.muted">characters</Text>
+                          </VStack>
+                          <VStack gap={0}>
+                            <Text fontSize="lg" fontWeight="bold" color="purple.400">
+                              {exploreProgress.locationsFound}
+                            </Text>
+                            <Text fontSize="xs" color="fg.muted">locations</Text>
+                          </VStack>
+                        </HStack>
+                        <Text fontSize="xs" color="fg.subtle" mt={1}>
+                          {Math.round(exploreElapsed / 1000)}s elapsed
+                          {exploreProgress.llmClassifications > 0 && ` · ${exploreProgress.llmClassifications} AI classifications`}
+                        </Text>
+                      </>
+                    )}
+                  </VStack>
                 </Flex>
               ) : !explorationResult ? (
                 <VStack py={12} gap={3}>

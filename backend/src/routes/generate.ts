@@ -1,11 +1,12 @@
 import { Hono } from "hono";
+import { sql } from "drizzle-orm";
 import { db } from "../db";
 import { characters, locations } from "../db/schema";
 
 const generateRoutes = new Hono();
 
 // Configuration
-const CLAUDE_MODEL = "claude-opus-4-5";
+const CLAUDE_MODEL = "claude-opus-4-6";
 
 // Types
 interface GeneratedCharacter {
@@ -205,7 +206,7 @@ Make them atmospheric and fit the Bay Area 2065 dystopian setting.`;
   }
 });
 
-// Import selected generated characters into database
+// Import selected generated characters into database (upsert)
 generateRoutes.post("/characters/import", async (c) => {
   const body = await c.req.json();
   const { items } = body as { items: GeneratedCharacter[] };
@@ -215,27 +216,31 @@ generateRoutes.post("/characters/import", async (c) => {
   }
   
   try {
-    const imported: { name: string; id: number }[] = [];
-    const skipped: { name: string; reason: string }[] = [];
+    const imported: { name: string; id: number; updated: boolean }[] = [];
+    const failed: { name: string; reason: string }[] = [];
     
     for (const item of items) {
       try {
         const result = db
           .insert(characters)
           .values({ name: item.name, blurb: item.blurb })
+          .onConflictDoUpdate({
+            target: characters.name,
+            set: {
+              blurb: item.blurb,
+              updatedAt: sql`(datetime('now'))`,
+            },
+          })
           .returning()
           .get();
-        imported.push({ name: result.name, id: result.id });
+        const wasUpdated = result.createdAt !== result.updatedAt;
+        imported.push({ name: result.name, id: result.id, updated: wasUpdated });
       } catch (err: any) {
-        if (err.message?.includes("UNIQUE constraint failed")) {
-          skipped.push({ name: item.name, reason: "Already exists" });
-        } else {
-          skipped.push({ name: item.name, reason: err.message || "Unknown error" });
-        }
+        failed.push({ name: item.name, reason: err.message || "Unknown error" });
       }
     }
     
-    return c.json({ imported, skipped });
+    return c.json({ imported, failed });
   } catch (error) {
     console.error("Import error:", error);
     return c.json({ 
@@ -244,7 +249,7 @@ generateRoutes.post("/characters/import", async (c) => {
   }
 });
 
-// Import selected generated locations into database
+// Import selected generated locations into database (upsert)
 generateRoutes.post("/locations/import", async (c) => {
   const body = await c.req.json();
   const { items } = body as { items: GeneratedLocation[] };
@@ -254,27 +259,31 @@ generateRoutes.post("/locations/import", async (c) => {
   }
   
   try {
-    const imported: { name: string; id: number }[] = [];
-    const skipped: { name: string; reason: string }[] = [];
+    const imported: { name: string; id: number; updated: boolean }[] = [];
+    const failed: { name: string; reason: string }[] = [];
     
     for (const item of items) {
       try {
         const result = db
           .insert(locations)
           .values({ name: item.name, blurb: item.blurb })
+          .onConflictDoUpdate({
+            target: locations.name,
+            set: {
+              blurb: item.blurb,
+              updatedAt: sql`(datetime('now'))`,
+            },
+          })
           .returning()
           .get();
-        imported.push({ name: result.name, id: result.id });
+        const wasUpdated = result.createdAt !== result.updatedAt;
+        imported.push({ name: result.name, id: result.id, updated: wasUpdated });
       } catch (err: any) {
-        if (err.message?.includes("UNIQUE constraint failed")) {
-          skipped.push({ name: item.name, reason: "Already exists" });
-        } else {
-          skipped.push({ name: item.name, reason: err.message || "Unknown error" });
-        }
+        failed.push({ name: item.name, reason: err.message || "Unknown error" });
       }
     }
     
-    return c.json({ imported, skipped });
+    return c.json({ imported, failed });
   } catch (error) {
     console.error("Import error:", error);
     return c.json({ 

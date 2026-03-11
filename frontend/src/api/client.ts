@@ -118,8 +118,9 @@ export interface ImportableItem {
 }
 
 export interface ImportResult {
-  imported: { name: string; id: number }[];
-  skipped: { name: string; reason: string }[];
+  imported: { name: string; id: number; updated?: boolean }[];
+  skipped?: { name: string; reason: string }[];
+  failed?: { name: string; reason: string }[];
 }
 
 export interface ExploredPage {
@@ -144,6 +145,23 @@ export interface ExplorationResult {
     llmClassifications: number;
     allPages: ExploredPage[];
   };
+}
+
+export interface ExploreJobProgress {
+  pagesScanned: number;
+  currentPage: string;
+  charactersFound: number;
+  locationsFound: number;
+  llmClassifications: number;
+}
+
+export interface ExploreJobStatus {
+  jobId: string;
+  status: "running" | "completed" | "failed";
+  progress: ExploreJobProgress;
+  elapsedMs: number;
+  result?: ExplorationResult;
+  error?: string;
 }
 
 export interface PageClassification {
@@ -188,12 +206,15 @@ export const importApi = {
       method: "POST",
       body: JSON.stringify({ pageUrl, notionToken }),
     }),
-  // Explore a page tree recursively to find characters and locations
-  exploreNotion: (pageUrl: string, maxDepth?: number, notionToken?: string) =>
-    request<ExplorationResult>("/import/notion/explore", {
+  // Start exploring a page tree (returns job ID)
+  startExplore: (pageUrl: string, maxDepth?: number, notionToken?: string) =>
+    request<{ jobId: string }>("/import/notion/explore", {
       method: "POST",
       body: JSON.stringify({ pageUrl, maxDepth, notionToken }),
     }),
+  // Poll exploration job status
+  pollExplore: (jobId: string) =>
+    request<ExploreJobStatus>(`/import/notion/explore/${jobId}`),
   // Preview page structure without full extraction
   previewNotion: (pageUrl: string, notionToken?: string) =>
     request<PagePreview>("/import/notion/preview", {
