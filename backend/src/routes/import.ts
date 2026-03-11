@@ -35,6 +35,7 @@ interface ExploreJob {
 const exploreJobs = new Map<string, ExploreJob>();
 
 const JOB_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const MAX_CONCURRENT_JOBS = 2;
 
 function cleanupOldJobs() {
   const now = Date.now();
@@ -44,6 +45,16 @@ function cleanupOldJobs() {
     }
   }
 }
+
+function countRunningJobs(): number {
+  let count = 0;
+  for (const job of exploreJobs.values()) {
+    if (job.status === "running") count++;
+  }
+  return count;
+}
+
+setInterval(cleanupOldJobs, 60_000);
 
 function generateJobId(): string {
   return `explore-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
@@ -112,6 +123,9 @@ interface PageClassification {
   };
 }
 
+const CLAUDE_TIMEOUT_MS = 60_000;
+const NOTION_TIMEOUT_MS = 30_000;
+
 // Notion API configuration
 const NOTION_API_BASE = "https://api.notion.com/v1";
 
@@ -129,23 +143,37 @@ async function callClaude(
   if (!apiKey) {
     throw new Error("ANTHROPIC_API_KEY not configured");
   }
-  
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: CLAUDE_MODEL,
-      max_tokens: 2000,
-      system: systemPrompt,
-      messages: [
-        { role: "user", content: userPrompt },
-      ],
-    }),
-  });
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CLAUDE_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: CLAUDE_MODEL,
+        max_tokens: 2000,
+        system: systemPrompt,
+        messages: [
+          { role: "user", content: userPrompt },
+        ],
+      }),
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    if (err.name === "AbortError") {
+      throw new Error(`Claude API timed out after ${CLAUDE_TIMEOUT_MS / 1000}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
@@ -263,13 +291,27 @@ function getNotionToken(requestToken?: string): string {
 }
 
 async function notionRequest(endpoint: string, token: string) {
-  const response = await fetch(`${NOTION_API_BASE}${endpoint}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Notion-Version": "2022-06-28",
-      "Content-Type": "application/json",
-    },
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), NOTION_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch(`${NOTION_API_BASE}${endpoint}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+      },
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    if (err.name === "AbortError") {
+      throw new Error(`Notion API timed out after ${NOTION_TIMEOUT_MS / 1000}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
@@ -330,15 +372,29 @@ async function fetchDatabasePages(databaseId: string, token: string): Promise<{ 
       const body: any = { page_size: 100 };
       if (cursor) body.start_cursor = cursor;
       
-      const response = await fetch(`${NOTION_API_BASE}${endpoint}`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Notion-Version": "2022-06-28",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-      });
+      const dbController = new AbortController();
+      const dbTimeout = setTimeout(() => dbController.abort(), NOTION_TIMEOUT_MS);
+
+      let response: Response;
+      try {
+        response = await fetch(`${NOTION_API_BASE}${endpoint}`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+          signal: dbController.signal,
+        });
+      } catch (err: any) {
+        if (err.name === "AbortError") {
+          console.error(`[Notion] Database query timed out after ${NOTION_TIMEOUT_MS / 1000}s`);
+        }
+        break;
+      } finally {
+        clearTimeout(dbTimeout);
+      }
       
       if (!response.ok) {
         console.error(`[Notion] Database query failed: ${response.status}`);
@@ -1081,7 +1137,8 @@ importRoutes.post("/notion/locations", async (c) => {
 // Start exploring a Notion page tree (returns job ID immediately)
 importRoutes.post("/notion/explore", async (c) => {
   const body = await c.req.json();
-  const { notionToken: requestToken, pageUrl, maxDepth = 3 } = body;
+  const { notionToken: requestToken, pageUrl, maxDepth: rawMaxDepth = 3 } = body;
+  const maxDepth = Math.min(Math.max(1, Math.floor(Number(rawMaxDepth) || 3)), 5);
   
   if (!pageUrl) {
     return c.json({ error: "Page URL is required" }, 400);
@@ -1092,6 +1149,10 @@ importRoutes.post("/notion/explore", async (c) => {
     const pageId = extractPageIdFromUrl(pageUrl);
     
     cleanupOldJobs();
+
+    if (countRunningJobs() >= MAX_CONCURRENT_JOBS) {
+      return c.json({ error: `Too many explorations running (max ${MAX_CONCURRENT_JOBS}). Please wait for the current one to finish.` }, 429);
+    }
     
     const jobId = generateJobId();
     const job: ExploreJob = {

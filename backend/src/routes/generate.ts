@@ -32,6 +32,8 @@ function getAnthropicKey(): string {
   return key;
 }
 
+const CLAUDE_TIMEOUT_MS = 60_000;
+
 // Claude API call
 async function callClaude(
   systemPrompt: string,
@@ -39,22 +41,36 @@ async function callClaude(
 ): Promise<string> {
   const apiKey = getAnthropicKey();
   
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: CLAUDE_MODEL,
-      max_tokens: 2000,
-      system: systemPrompt,
-      messages: [
-        { role: "user", content: userPrompt },
-      ],
-    }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CLAUDE_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: CLAUDE_MODEL,
+        max_tokens: 2000,
+        system: systemPrompt,
+        messages: [
+          { role: "user", content: userPrompt },
+        ],
+      }),
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    if (err.name === "AbortError") {
+      throw new Error(`Claude API timed out after ${CLAUDE_TIMEOUT_MS / 1000}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
@@ -127,7 +143,8 @@ generateRoutes.get("/status", async (c) => {
 // Generate characters from prompt
 generateRoutes.post("/characters", async (c) => {
   const body = await c.req.json();
-  const { prompt, count = 3 } = body;
+  const { prompt, count: rawCount = 3 } = body;
+  const count = Math.min(Math.max(1, Math.floor(Number(rawCount) || 3)), 20);
   
   if (!prompt) {
     return c.json({ error: "Prompt is required" }, 400);
@@ -168,7 +185,8 @@ Make them diverse and interesting. They should fit the Bay Area 2065 dystopian s
 // Generate locations from prompt
 generateRoutes.post("/locations", async (c) => {
   const body = await c.req.json();
-  const { prompt, count = 3 } = body;
+  const { prompt, count: rawCount = 3 } = body;
+  const count = Math.min(Math.max(1, Math.floor(Number(rawCount) || 3)), 20);
   
   if (!prompt) {
     return c.json({ error: "Prompt is required" }, 400);
