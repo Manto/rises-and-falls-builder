@@ -122,6 +122,55 @@ export const variableChanges = sqliteTable(
   ]
 );
 
+// Character reference images (for LoRA training)
+export const characterReferenceImages = sqliteTable(
+  "character_reference_images",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    characterId: integer("character_id")
+      .notNull()
+      .references(() => characters.id, { onDelete: "cascade" }),
+    filename: text("filename").notNull(),
+    originalFilename: text("original_filename").notNull(),
+    caption: text("caption").notNull().default(""),
+    createdAt: text("created_at")
+      .notNull()
+      .default(sql`(datetime('now'))`),
+  },
+  (table) => [index("idx_char_ref_images_character").on(table.characterId)]
+);
+
+// World styles (for style LoRA training)
+export const worldStyles = sqliteTable("world_styles", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull().unique(),
+  description: text("description").notNull().default(""),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(datetime('now'))`),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`(datetime('now'))`),
+});
+
+// World style reference images (for LoRA training)
+export const worldStyleReferenceImages = sqliteTable(
+  "world_style_reference_images",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    worldStyleId: integer("world_style_id")
+      .notNull()
+      .references(() => worldStyles.id, { onDelete: "cascade" }),
+    filename: text("filename").notNull(),
+    originalFilename: text("original_filename").notNull(),
+    caption: text("caption").notNull().default(""),
+    createdAt: text("created_at")
+      .notNull()
+      .default(sql`(datetime('now'))`),
+  },
+  (table) => [index("idx_world_ref_images_style").on(table.worldStyleId)]
+);
+
 // Export types inferred from schema
 export type Character = typeof characters.$inferSelect;
 export type NewCharacter = typeof characters.$inferInsert;
@@ -143,4 +192,13 @@ export type NewPrecondition = typeof preconditions.$inferInsert;
 
 export type VariableChange = typeof variableChanges.$inferSelect;
 export type NewVariableChange = typeof variableChanges.$inferInsert;
+
+export type CharacterReferenceImage = typeof characterReferenceImages.$inferSelect;
+export type NewCharacterReferenceImage = typeof characterReferenceImages.$inferInsert;
+
+export type WorldStyle = typeof worldStyles.$inferSelect;
+export type NewWorldStyle = typeof worldStyles.$inferInsert;
+
+export type WorldStyleReferenceImage = typeof worldStyleReferenceImages.$inferSelect;
+export type NewWorldStyleReferenceImage = typeof worldStyleReferenceImages.$inferInsert;
 

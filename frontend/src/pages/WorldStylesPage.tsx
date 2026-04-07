@@ -29,37 +29,36 @@ import {
 import { Field } from "../components/ui/field";
 import { toaster } from "../components/ui/toaster";
 import { FiPlus, FiEdit2, FiTrash2, FiImage } from "react-icons/fi";
-import { charactersApi, referenceImagesApi } from "../api/client";
+import { worldStylesApi, referenceImagesApi } from "../api/client";
 import { ReferenceImageManager } from "../components/ReferenceImageManager";
-import type { Character, CreateCharacterInput } from "../types";
+import type { WorldStyle, CreateWorldStyleInput } from "../types";
 
-export function CharactersPage() {
-  const [characters, setCharacters] = useState<Character[]>([]);
+export function WorldStylesPage() {
+  const [styles, setStyles] = useState<WorldStyle[]>([]);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editingCharacter, setEditingCharacter] = useState<Character | null>(null);
+  const [editingStyle, setEditingStyle] = useState<WorldStyle | null>(null);
   const [isConfirmDeleteOpen, setIsConfirmDeleteOpen] = useState(false);
-  const [characterToDelete, setCharacterToDelete] = useState<number | null>(null);
+  const [styleToDelete, setStyleToDelete] = useState<number | null>(null);
   const [imageCounts, setImageCounts] = useState<Record<number, number>>({});
 
   useEffect(() => {
-    loadCharacters();
+    loadStyles();
   }, []);
 
-  async function loadCharacters() {
+  async function loadStyles() {
     try {
       setLoading(true);
-      const data = await charactersApi.list();
-      setCharacters(data);
-      // Load image counts for all characters
+      const data = await worldStylesApi.list();
+      setStyles(data);
       const counts: Record<number, number> = {};
       await Promise.all(
-        data.map(async (ch) => {
+        data.map(async (s) => {
           try {
-            const imgs = await referenceImagesApi.listForCharacter(ch.id);
-            counts[ch.id] = imgs.length;
+            const imgs = await referenceImagesApi.listForWorldStyle(s.id);
+            counts[s.id] = imgs.length;
           } catch {
-            counts[ch.id] = 0;
+            counts[s.id] = 0;
           }
         })
       );
@@ -67,7 +66,7 @@ export function CharactersPage() {
     } catch (err) {
       toaster.error({
         title: "Error",
-        description: err instanceof Error ? err.message : "Failed to load characters",
+        description: err instanceof Error ? err.message : "Failed to load world styles",
       });
     } finally {
       setLoading(false);
@@ -75,46 +74,46 @@ export function CharactersPage() {
   }
 
   function openCreateModal() {
-    setEditingCharacter(null);
+    setEditingStyle(null);
     setIsModalOpen(true);
   }
 
-  function openEditModal(character: Character) {
-    setEditingCharacter(character);
+  function openEditModal(style: WorldStyle) {
+    setEditingStyle(style);
     setIsModalOpen(true);
   }
 
   function handleDeleteClick(id: number) {
-    setCharacterToDelete(id);
+    setStyleToDelete(id);
     setIsConfirmDeleteOpen(true);
   }
 
   async function handleDeleteConfirm() {
-    if (!characterToDelete) return;
+    if (!styleToDelete) return;
     try {
-      await charactersApi.delete(characterToDelete);
-      toaster.success({ title: "Character deleted" });
-      await loadCharacters();
+      await worldStylesApi.delete(styleToDelete);
+      toaster.success({ title: "World style deleted" });
+      await loadStyles();
     } catch (err) {
       toaster.error({
         title: "Error",
         description: err instanceof Error ? err.message : "Failed to delete",
       });
     } finally {
-      setCharacterToDelete(null);
+      setStyleToDelete(null);
     }
   }
 
-  async function handleSave(data: CreateCharacterInput) {
-    if (editingCharacter) {
-      await charactersApi.update(editingCharacter.id, data);
-      toaster.success({ title: "Character updated" });
+  async function handleSave(data: CreateWorldStyleInput) {
+    if (editingStyle) {
+      await worldStylesApi.update(editingStyle.id, data);
+      toaster.success({ title: "World style updated" });
     } else {
-      await charactersApi.create(data);
-      toaster.success({ title: "Character created" });
+      await worldStylesApi.create(data);
+      toaster.success({ title: "World style created" });
     }
     setIsModalOpen(false);
-    await loadCharacters();
+    await loadStyles();
   }
 
   if (loading) {
@@ -128,22 +127,33 @@ export function CharactersPage() {
   return (
     <Box>
       <Flex justify="space-between" align="center" mb={4}>
-        <Heading size="lg" color="fg.DEFAULT">Characters</Heading>
+        <VStack align="flex-start" gap={0}>
+          <Heading size="lg" color="fg.DEFAULT">
+            World Styles
+          </Heading>
+          <Text fontSize="sm" color="fg.muted">
+            Style reference sets for visual LoRA training
+          </Text>
+        </VStack>
         <Button
           bg="accent.DEFAULT"
           color="fg.inverted"
           _hover={{ bg: "accent.emphasis" }}
           onClick={openCreateModal}
         >
-          <FiPlus /> New Character
+          <FiPlus /> New Style
         </Button>
       </Flex>
 
-      {characters.length === 0 ? (
+      {styles.length === 0 ? (
         <VStack py={8} gap={3}>
-          <Text fontSize="3xl">👤</Text>
+          <Text fontSize="3xl">🎨</Text>
           <Text fontSize="md" color="fg.muted">
-            No characters yet
+            No world styles yet
+          </Text>
+          <Text fontSize="sm" color="fg.subtle" textAlign="center" maxW="md">
+            Create a world style to collect reference images that define the
+            visual aesthetic for LoRA training.
           </Text>
           <Button
             bg="accent.DEFAULT"
@@ -151,14 +161,14 @@ export function CharactersPage() {
             _hover={{ bg: "accent.emphasis" }}
             onClick={openCreateModal}
           >
-            Create your first character
+            Create your first world style
           </Button>
         </VStack>
       ) : (
         <Grid templateColumns="repeat(auto-fill, minmax(280px, 1fr))" gap={3}>
-          {characters.map((character) => (
+          {styles.map((style) => (
             <Card.Root
-              key={character.id}
+              key={style.id}
               bg="bg.panel"
               borderWidth="1px"
               borderColor="border.DEFAULT"
@@ -168,7 +178,9 @@ export function CharactersPage() {
             >
               <Card.Body p={3}>
                 <Flex justify="space-between" align="flex-start" mb={2}>
-                  <Heading size="sm" color="fg.DEFAULT">{character.name}</Heading>
+                  <Heading size="sm" color="fg.DEFAULT">
+                    {style.name}
+                  </Heading>
                   <Flex gap={1}>
                     <IconButton
                       aria-label="Edit"
@@ -176,7 +188,7 @@ export function CharactersPage() {
                       size="sm"
                       color="fg.muted"
                       _hover={{ color: "fg.DEFAULT", bg: "bg.muted" }}
-                      onClick={() => openEditModal(character)}
+                      onClick={() => openEditModal(style)}
                     >
                       <FiEdit2 />
                     </IconButton>
@@ -186,22 +198,26 @@ export function CharactersPage() {
                       size="sm"
                       color="error.fg"
                       _hover={{ bg: "error.muted" }}
-                      onClick={() => handleDeleteClick(character.id)}
+                      onClick={() => handleDeleteClick(style.id)}
                     >
                       <FiTrash2 />
                     </IconButton>
                   </Flex>
                 </Flex>
-                {character.blurb && (
+                {style.description && (
                   <Text color="fg.muted" fontStyle="italic" fontSize="sm">
-                    {character.blurb}
+                    {style.description}
                   </Text>
                 )}
-                {(imageCounts[character.id] ?? 0) > 0 && (
+                {(imageCounts[style.id] ?? 0) > 0 && (
                   <Flex align="center" gap={1} mt={2}>
-                    <FiImage size={12} color="var(--chakra-colors-fg-subtle)" />
+                    <FiImage
+                      size={12}
+                      color="var(--chakra-colors-fg-subtle)"
+                    />
                     <Text fontSize="xs" color="fg.subtle">
-                      {imageCounts[character.id]} ref image{imageCounts[character.id] > 1 ? "s" : ""}
+                      {imageCounts[style.id]} ref image
+                      {imageCounts[style.id] > 1 ? "s" : ""}
                     </Text>
                   </Flex>
                 )}
@@ -211,18 +227,18 @@ export function CharactersPage() {
         </Grid>
       )}
 
-      <CharacterModal
+      <WorldStyleModal
         open={isModalOpen}
         onOpenChange={(open) => setIsModalOpen(open)}
-        character={editingCharacter}
+        style={editingStyle}
         onSave={handleSave}
       />
 
       <ConfirmDialog
         open={isConfirmDeleteOpen}
         onOpenChange={setIsConfirmDeleteOpen}
-        title="Delete Character"
-        description="Are you sure you want to delete this character? This action cannot be undone."
+        title="Delete World Style"
+        description="Are you sure you want to delete this world style? All reference images will be removed. This action cannot be undone."
         confirmText="Delete"
         onConfirm={handleDeleteConfirm}
         confirmColorScheme="red"
@@ -231,24 +247,29 @@ export function CharactersPage() {
   );
 }
 
-interface CharacterModalProps {
+interface WorldStyleModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  character: Character | null;
-  onSave: (data: CreateCharacterInput) => Promise<void>;
+  style: WorldStyle | null;
+  onSave: (data: CreateWorldStyleInput) => Promise<void>;
 }
 
-function CharacterModal({ open, onOpenChange, character, onSave }: CharacterModalProps) {
+function WorldStyleModal({
+  open,
+  onOpenChange,
+  style,
+  onSave,
+}: WorldStyleModalProps) {
   const [name, setName] = useState("");
-  const [blurb, setBlurb] = useState("");
+  const [description, setDescription] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (open) {
-      setName(character?.name || "");
-      setBlurb(character?.blurb || "");
+      setName(style?.name || "");
+      setDescription(style?.description || "");
     }
-  }, [open, character]);
+  }, [open, style]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -256,10 +277,9 @@ function CharacterModal({ open, onOpenChange, character, onSave }: CharacterModa
       toaster.error({ title: "Name is required" });
       return;
     }
-
     try {
       setSaving(true);
-      await onSave({ name: name.trim(), blurb: blurb.trim() });
+      await onSave({ name: name.trim(), description: description.trim() });
     } catch (err) {
       toaster.error({
         title: "Error",
@@ -271,11 +291,15 @@ function CharacterModal({ open, onOpenChange, character, onSave }: CharacterModa
   }
 
   return (
-    <DialogRoot open={open} onOpenChange={(e) => onOpenChange(e.open)} placement="center">
+    <DialogRoot
+      open={open}
+      onOpenChange={(e) => onOpenChange(e.open)}
+      placement="center"
+    >
       <DialogBackdrop />
       <DialogContent
         bg="bg.panel"
-        maxW={character ? "2xl" : "md"}
+        maxW={style ? "2xl" : "md"}
         borderWidth="1px"
         borderColor="border.DEFAULT"
         maxH="85vh"
@@ -284,7 +308,7 @@ function CharacterModal({ open, onOpenChange, character, onSave }: CharacterModa
         <form onSubmit={handleSubmit}>
           <DialogHeader>
             <DialogTitle color="fg.DEFAULT">
-              {character ? "Edit Character" : "New Character"}
+              {style ? "Edit World Style" : "New World Style"}
             </DialogTitle>
             <DialogCloseTrigger asChild>
               <CloseButton size="sm" />
@@ -296,35 +320,40 @@ function CharacterModal({ open, onOpenChange, character, onSave }: CharacterModa
                 <Input
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="Enter character name"
+                  placeholder="e.g. Watercolor Fantasy, Ink Wash, Pixel Art"
                   bg="bg.subtle"
                   borderColor="border.DEFAULT"
                   _hover={{ borderColor: "border.strong" }}
-                  _focus={{ borderColor: "accent.DEFAULT", boxShadow: "none" }}
+                  _focus={{
+                    borderColor: "accent.DEFAULT",
+                    boxShadow: "none",
+                  }}
                   autoFocus
                 />
               </Field>
-              <Field label="Blurb">
+              <Field label="Description">
                 <Textarea
-                  value={blurb}
-                  onChange={(e) => setBlurb(e.target.value)}
-                  placeholder="A brief description of this character"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="Describe the visual style this set of references represents"
                   rows={3}
                   bg="bg.subtle"
                   borderColor="border.DEFAULT"
                   _hover={{ borderColor: "border.strong" }}
-                  _focus={{ borderColor: "accent.DEFAULT", boxShadow: "none" }}
+                  _focus={{
+                    borderColor: "accent.DEFAULT",
+                    boxShadow: "none",
+                  }}
                 />
               </Field>
 
-              {/* Reference images — only shown when editing an existing character */}
-              {character && (
+              {style && (
                 <>
                   <Separator borderColor="border.DEFAULT" />
                   <ReferenceImageManager
-                    entityType="characters"
-                    entityId={character.id}
-                    entityName={character.name}
+                    entityType="world-styles"
+                    entityId={style.id}
+                    entityName={style.name}
                   />
                 </>
               )}
@@ -341,7 +370,7 @@ function CharacterModal({ open, onOpenChange, character, onSave }: CharacterModa
               _hover={{ bg: "accent.emphasis" }}
               loading={saving}
             >
-              {character ? "Update" : "Create"}
+              {style ? "Update" : "Create"}
             </Button>
           </DialogFooter>
         </form>

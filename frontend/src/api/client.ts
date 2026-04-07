@@ -8,6 +8,9 @@ import type {
   Scene,
   CreateSceneInput,
   UpdateSceneInput,
+  ReferenceImage,
+  WorldStyle,
+  CreateWorldStyleInput,
 } from "../types";
 
 const API_BASE = "/api";
@@ -231,6 +234,86 @@ export const importApi = {
       method: "POST",
       body: JSON.stringify({ items }),
     }),
+};
+
+// World Styles API
+export const worldStylesApi = {
+  list: () => request<WorldStyle[]>("/world-styles"),
+  get: (id: number) => request<WorldStyle>(`/world-styles/${id}`),
+  create: (data: CreateWorldStyleInput) =>
+    request<WorldStyle>("/world-styles", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  update: (id: number, data: Partial<CreateWorldStyleInput>) =>
+    request<WorldStyle>(`/world-styles/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  delete: (id: number) =>
+    request<{ success: boolean }>(`/world-styles/${id}`, { method: "DELETE" }),
+};
+
+// Reference Images API
+export const referenceImagesApi = {
+  listForCharacter: (characterId: number) =>
+    request<ReferenceImage[]>(`/reference-images/characters/${characterId}`),
+
+  uploadForCharacter: async (characterId: number, files: File[], caption?: string) => {
+    const formData = new FormData();
+    files.forEach((f) => formData.append("files", f));
+    if (caption) formData.append("caption", caption);
+    const res = await fetch(`${API_BASE}/reference-images/characters/${characterId}/upload`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Upload failed" }));
+      throw new Error(err.error || "Upload failed");
+    }
+    return res.json() as Promise<ReferenceImage[]>;
+  },
+
+  updateCaption: (imageId: number, caption: string, type: "characters" | "world-styles") =>
+    request<ReferenceImage>(`/reference-images/${type}/images/${imageId}`, {
+      method: "PUT",
+      body: JSON.stringify({ caption }),
+    }),
+
+  deleteCharacterImage: (imageId: number) =>
+    request<{ success: boolean }>(`/reference-images/characters/images/${imageId}`, {
+      method: "DELETE",
+    }),
+
+  listForWorldStyle: (worldStyleId: number) =>
+    request<ReferenceImage[]>(`/reference-images/world-styles/${worldStyleId}`),
+
+  uploadForWorldStyle: async (worldStyleId: number, files: File[], caption?: string) => {
+    const formData = new FormData();
+    files.forEach((f) => formData.append("files", f));
+    if (caption) formData.append("caption", caption);
+    const res = await fetch(`${API_BASE}/reference-images/world-styles/${worldStyleId}/upload`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Upload failed" }));
+      throw new Error(err.error || "Upload failed");
+    }
+    return res.json() as Promise<ReferenceImage[]>;
+  },
+
+  deleteWorldStyleImage: (imageId: number) =>
+    request<{ success: boolean }>(`/reference-images/world-styles/images/${imageId}`, {
+      method: "DELETE",
+    }),
+
+  getImageUrl: (type: "characters" | "world-styles", entityId: number, filename: string) =>
+    `${API_BASE}/reference-images/file/${type}/${entityId}/${filename}`,
+
+  downloadLoraZip: (type: "characters" | "world-styles", entityId: number) => {
+    window.open(`${API_BASE}/reference-images/download/${type}/${entityId}`, "_blank");
+  },
 };
 
 // Generate API (AI - uses server-side Claude key)

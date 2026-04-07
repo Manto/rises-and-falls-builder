@@ -11,6 +11,7 @@ import { ScenesPage } from "./pages/ScenesPage";
 import { CharactersPage } from "./pages/CharactersPage";
 import { LocationsPage } from "./pages/LocationsPage";
 import { VariablesPage } from "./pages/VariablesPage";
+import { WorldStylesPage } from "./pages/WorldStylesPage";
 import { ImportPage } from "./pages/ImportPage";
 
 const navItems = [
@@ -18,6 +19,7 @@ const navItems = [
   { path: "/characters", label: "Characters" },
   { path: "/locations", label: "Locations" },
   { path: "/variables", label: "Variables" },
+  { path: "/world-styles", label: "World Styles" },
   { path: "/import", label: "Import & Generate" },
 ];
 
@@ -102,6 +104,7 @@ function App() {
             <Route path="/characters" element={<CharactersPage />} />
             <Route path="/locations" element={<LocationsPage />} />
             <Route path="/variables" element={<VariablesPage />} />
+            <Route path="/world-styles" element={<WorldStylesPage />} />
             <Route path="/import" element={<ImportPage />} />
           </Routes>
         </Container>

@@ -86,3 +86,28 @@ export interface CreateSceneInput {
 
 export interface UpdateSceneInput extends Partial<CreateSceneInput> {}
 
+// Reference images for LoRA training
+export interface ReferenceImage {
+  id: number;
+  characterId?: number;
+  worldStyleId?: number;
+  filename: string;
+  originalFilename: string;
+  caption: string;
+  createdAt: string;
+}
+
+// World style (for style LoRA training)
+export interface WorldStyle {
+  id: number;
+  name: string;
+  description: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateWorldStyleInput {
+  name: string;
+  description: string;
+}
+

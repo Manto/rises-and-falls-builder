@@ -14,6 +14,12 @@ export type {
   NewPrecondition,
   VariableChange,
   NewVariableChange,
+  CharacterReferenceImage,
+  NewCharacterReferenceImage,
+  WorldStyle,
+  NewWorldStyle,
+  WorldStyleReferenceImage,
+  NewWorldStyleReferenceImage,
 } from "./db/schema";
 
 // ============================================

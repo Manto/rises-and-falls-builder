@@ -7,6 +7,8 @@ import variables from "./routes/variables";
 import scenes from "./routes/scenes";
 import importRoutes from "./routes/import";
 import generateRoutes from "./routes/generate";
+import worldStyles from "./routes/world-styles";
+import referenceImages from "./routes/reference-images";
 
 // Create the app
 const app = new Hono();
@@ -16,7 +18,7 @@ app.use("*", logger());
 app.use(
   "*",
   cors({
-    origin: ["http://localhost:5173", "http://127.0.0.1:5173"],
+    origin: ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3003"],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type"],
   })
@@ -38,6 +40,8 @@ app.route("/api/variables", variables);
 app.route("/api/scenes", scenes);
 app.route("/api/import", importRoutes);
 app.route("/api/generate", generateRoutes);
+app.route("/api/world-styles", worldStyles);
+app.route("/api/reference-images", referenceImages);
 
 // Error handling
 app.onError((err, c) => {
@@ -46,7 +50,7 @@ app.onError((err, c) => {
 });
 
 // Start the server
-const port = 3000;
+const port = 3003;
 console.log(`🚀 Server running at http://localhost:${port}`);
 
 export default {
